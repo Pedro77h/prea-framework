@@ -1,0 +1,12 @@
+package {{.Pkg}}
+
+// {{.Name}} maps a row of the "{{.Pkg}}" table. Columns match fields by name
+// (snake_case); use a `db` tag to override.
+type {{.Name}} struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+func ({{.Name}}) Table() string {
+	return "{{.Pkg}}"
+}

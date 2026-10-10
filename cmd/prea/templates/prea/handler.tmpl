@@ -1,0 +1,84 @@
+package {{.Pkg}}
+
+import (
+	"{{.Import}}/dtos"
+	"fmt"
+	"net/http"
+	"{{.Framework}}/common"
+	"{{.Framework}}/core"
+
+	"github.com/gin-gonic/gin"
+)
+
+// Handler is the HTTP layer: routes, binding and responses only.
+type Handler struct {
+	Service *Service `inject:""`
+}
+
+var _ core.Router = (*Handler)(nil)
+
+func (h *Handler) Register(r gin.IRouter) {
+	// Middlewares go before the handler: g.GET("", middleware.Auth, h.list)
+	g := r.Group("/{{.Pkg}}")
+	g.GET("", h.list)
+	g.GET("/:id", h.get)
+	g.POST("", h.create)
+	g.PATCH("/:id", h.update)
+	g.DELETE("/:id", h.delete)
+}
+
+func (h *Handler) list(c *gin.Context) {
+	items, err := h.Service.List(c.Request.Context())
+	if err != nil {
+		core.Error(c, err)
+		return
+	}
+	core.Response(c, http.StatusOK, items)
+}
+
+func (h *Handler) get(c *gin.Context) {
+	item, err := h.Service.Get(c.Request.Context(), c.Param("id"))
+	if err != nil {
+		core.Error(c, err)
+		return
+	}
+	core.Response(c, http.StatusOK, item)
+}
+
+func (h *Handler) create(c *gin.Context) {
+	var req dtos.CreateRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		core.Error(c, fmt.Errorf("%w: %v", common.ErrInvalidInput, err))
+		return
+	}
+
+	item, err := h.Service.Create(c.Request.Context(), req)
+	if err != nil {
+		core.Error(c, err)
+		return
+	}
+	core.Response(c, http.StatusCreated, item)
+}
+
+func (h *Handler) update(c *gin.Context) {
+	var req dtos.UpdateRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		core.Error(c, fmt.Errorf("%w: %v", common.ErrInvalidInput, err))
+		return
+	}
+
+	item, err := h.Service.Update(c.Request.Context(), c.Param("id"), req)
+	if err != nil {
+		core.Error(c, err)
+		return
+	}
+	core.Response(c, http.StatusOK, item)
+}
+
+func (h *Handler) delete(c *gin.Context) {
+	if err := h.Service.Delete(c.Request.Context(), c.Param("id")); err != nil {
+		core.Error(c, err)
+		return
+	}
+	c.Status(http.StatusNoContent)
+}

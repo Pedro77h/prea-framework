@@ -1,0 +1,40 @@
+package {{.Pkg}}
+
+import (
+	"{{.Import}}/dtos"
+	"context"
+	"fmt"
+	"{{.Framework}}/common"
+	"strings"
+)
+
+// Service holds the business rules. Return common.Err* (wrapped) so the
+// handler can pick the HTTP status.
+type Service struct {
+	Repo *Repository `inject:""`
+}
+
+func (s *Service) List(ctx context.Context) ([]{{.Name}}, error) {
+	return s.Repo.GetAll(ctx)
+}
+
+func (s *Service) Get(ctx context.Context, id string) ({{.Name}}, error) {
+	return s.Repo.GetByID(ctx, id)
+}
+
+func (s *Service) Create(ctx context.Context, req dtos.CreateRequest) ({{.Name}}, error) {
+	req.Name = strings.TrimSpace(req.Name)
+	if req.Name == "" {
+		return {{.Name}}{}, fmt.Errorf("%w: name can't be blank", common.ErrInvalidInput)
+	}
+	return s.Repo.Create(ctx, req)
+}
+
+func (s *Service) Update(ctx context.Context, id string, req dtos.UpdateRequest) ({{.Name}}, error) {
+	req.Name = strings.TrimSpace(req.Name)
+	return s.Repo.Update(ctx, id, req)
+}
+
+func (s *Service) Delete(ctx context.Context, id string) error {
+	return s.Repo.Delete(ctx, id)
+}

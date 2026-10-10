@@ -1,0 +1,15 @@
+package {{.Pkg}}
+
+import (
+	"{{.Framework}}/core"
+	"{{.Framework}}/di"
+)
+
+var Module = &core.Module{
+	Name: "{{.Pkg}}",
+	Providers: []any{
+		new(Repository),
+		di.Export(new(Service)),
+		new(Handler),
+	},
+}

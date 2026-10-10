@@ -1,0 +1,19 @@
+package middleware
+
+import (
+	"{{.Framework}}/core"
+
+	"github.com/gin-gonic/gin"
+)
+
+var _ core.Middleware = {{.Name}}
+
+// {{.Name}} can be used per route (g.GET("", middleware.{{.Name}}, h.list)),
+// per module (core.Module.Middlewares) or globally (preas.Middlewares).
+func {{.Name}}(c *gin.Context) {
+	// before the handler
+
+	c.Next() // or c.Abort() to stop the chain
+
+	// after the handler
+}
