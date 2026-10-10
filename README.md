@@ -15,7 +15,9 @@ Framework web modular para Go, inspirado no Spring e no Angular. Ele traz módul
   - [Handler, Service, Repository, Model e DTOs](#handler-service-repository-model-e-dtos)
   - [Banco de dados](#banco-de-dados)
   - [Middlewares](#middlewares)
+  - [Logs](#logs)
   - [Erros e respostas](#erros-e-respostas)
+  - [Segurança HTTP](#segurança-http)
   - [Autenticação](#autenticação)
 - [CLI](#cli)
 - [Configuração](#configuração)
@@ -33,13 +35,13 @@ Framework web modular para Go, inspirado no Spring e no Angular. Ele traz módul
 go install ./cmd/prea
 
 # 2. Configuração
-cp .env.example .env        # preencha PGCONN e JWTKEY (use um segredo longo)
+cp .env.example .env        # preencha PGCONN e JWTKEY (openssl rand -base64 32)
 
 # 3. Banco: por enquanto as migrations são aplicadas manualmente
 psql "$PGCONN" -f internal/preas/user/migrations/user.sql
 
 # 4. Subir o servidor
-prea run -p 8000            # equivale a: PORT=8000 go run ./cmd/server
+prea run -p 8000            # compila ./cmd/server e roda com PORT=8000
 ```
 
 Para testar:
@@ -49,7 +51,7 @@ Para testar:
 curl -X POST localhost:8000/users -H 'Content-Type: application/json' \
   -d '{"name":"Pedro","username":"pedro","email":"p@x.com","password":"s3cret","profile":1}'
 
-# login → { "token": "...", "payload": {...} }
+# login → { "code": 1, "data": { "token": "...", "payload": {...} } }
 curl -X POST localhost:8000/auth/login -H 'Content-Type: application/json' \
   -d '{"username":"pedro","password":"s3cret"}'
 
@@ -67,14 +69,15 @@ prea/
 │   └── server/              # entrypoint da aplicação
 ├── internal/                # código da aplicação
 │   ├── preas/
-│   │   ├── preas.go         # lista de módulos e middlewares globais
+│   │   ├── preas.go         # módulos, segurança HTTP e middlewares globais
 │   │   ├── user/
 │   │   └── auth/
 │   └── middleware/          # middlewares da aplicação
-├── core/                    # framework: Module, App, Router, Middleware, respostas
+├── core/                    # framework: Module, App, Router, Middleware, Security, respostas
 ├── di/                      # framework: container de injeção
 ├── database/                # framework: BaseRepository, Prepare
 ├── security/                # framework: JWT e hash de senha (argon2id)
+├── logger/                  # framework: logs por nível (slog)
 └── common/                  # framework: erros de domínio e env
 ```
 
@@ -100,9 +103,9 @@ user/
 var Module = &core.Module{
 	Name: "user",
 	Providers: []any{
-		new(Repository),
-		di.Export(new(Service)), // visível para módulos que importarem este
-		new(Handler),
+		Repository{},
+		di.Export(Service{}), // visível para módulos que importarem este
+		Handler{},
 	},
 }
 ```
@@ -113,7 +116,7 @@ Um módulo que usa outro o declara em `Imports`:
 var Module = &core.Module{
 	Name:      "auth",
 	Imports:   []*core.Module{user.Module},
-	Providers: []any{new(Service), new(Handler)},
+	Providers: []any{Service{}, Handler{}},
 }
 ```
 
@@ -132,12 +135,65 @@ type Service struct {
 
 - **Ordem de busca:** os providers do próprio módulo, depois os exports dos módulos importados, depois os globais (`core.App.Globals`, por exemplo o pool do banco).
 - **Interfaces:** um campo do tipo interface é injetado se existir exatamente um provider que a implementa.
+- **Mais de um candidato** para o mesmo tipo dá erro na subida, e o erro pede um nome. Nunca é escolhido um em silêncio.
 - **Structs embutidas** também são injetadas; é assim que o `BaseRepository` recebe a conexão.
-- **Campo já preenchido** à mão é mantido, o que ajuda em testes com mocks.
-- Os componentes são **singletons** e precisam ser ponteiros para struct. Os campos injetados precisam ser exportados.
+- **Providers são declarados como valor** (`Repository{}`), e não como ponteiro. O módulo é só uma declaração: cada container (cada `core.App`) cria as **próprias instâncias** a partir dela e nunca altera a declaração.
+  - Dois `App` no mesmo processo, como testes com bancos diferentes ou uma API e um admin, não compartilham nada.
+  - Vários containers podem carregar o mesmo módulo ao mesmo tempo sem data race.
+  - Declarar com `new(Repository)` dá erro na subida: `provider *user.Repository must be declared as a value, user.Repository{}`.
+- **Campo preenchido na declaração** é mantido, o que serve para mocks e configuração: `Service{Repo: mockRepo}` e `routes{path: "/x"}`. A cópia é rasa, então ponteiros preenchidos ali são compartilhados por quem usar a mesma declaração.
+- Os componentes são **singletons por container**: dentro de um `App`, todos que injetam `*Service` recebem a mesma instância. Os campos injetados precisam ser exportados.
+- Instâncias prontas, como o pool do banco, entram em `core.App.Globals`, e essas sim são compartilhadas.
+- **Concorrência:** um mesmo componente atende todas as requisições ao mesmo tempo, cada uma em sua goroutine. Não guarde estado de requisição em campos da struct; use variáveis locais ou o `gin.Context`. Estado compartilhado mutável precisa de `sync.Mutex` ou `atomic`.
 - **Erros aparecem na subida**, com o caminho do campo, por exemplo `di: module auth: Service.Users: no provider for *user.Service`. Isso vale para dependência faltando, provider duplicado, interface ambígua e ciclo de imports.
 
 A tag `inject` sem valor também funciona, mas o `go vet` reclama dela. Prefira `inject:""`.
+
+**Componentes nomeados.** O nome é opcional, como um token do Angular. Ele serve para quando há mais de um componente do mesmo tipo:
+
+```go
+// cmd/server/main.go
+Globals: []any{mainDB, di.Named("analytics", analyticsDB)}
+
+// em um módulo; Named e Export podem ser combinados em qualquer ordem
+Providers: []any{di.Named("stripe", Gateway{}), di.Export(di.Named("paypal", Gateway{}))}
+
+type Reports struct {
+	DB        *pgxpool.Pool `inject:""`          // o sem nome (mainDB)
+	Analytics *pgxpool.Pool `inject:"analytics"` // o nomeado
+}
+```
+
+- `inject:"nome"` procura só os componentes com esse nome.
+- `inject:""` prefere o componente sem nome. Se só existir um, mesmo nomeado, ele é usado.
+
+**Ciclo de vida.** Um componente pode ter, opcionalmente, hooks de subida e de desligamento:
+
+```go
+type Mailer struct {
+	Config *Config `inject:""`
+	client *smtp.Client
+}
+
+// roda na subida, depois da injeção e antes de o servidor aceitar requisições
+func (m *Mailer) Init(ctx context.Context) error {
+	c, err := smtp.Dial(m.Config.SMTPAddr)
+	if err != nil {
+		return err // a app não sobe
+	}
+	m.client = c
+	return nil
+}
+
+// roda no desligamento, depois que as requisições em andamento terminam
+func (m *Mailer) Close(ctx context.Context) error { return m.client.Quit() }
+```
+
+- **`Init`** faz o papel de construtor: lê config, valida, abre conexões. Se der erro, a app não sobe, e os componentes que já tinham iniciado são fechados.
+- **Ordem:** o `Init` segue as dependências. Se A injeta B, o `B.Init` roda antes do `A.Init`, inclusive entre módulos. O `Close` roda na ordem inversa.
+- **`Close`** pode ser `Close(ctx) error` ou `Close() error` (`io.Closer`). Ele roda no desligamento gracioso, antes de o pool do banco fechar.
+- **Globals não passam pelo ciclo de vida:** quem cria, como o `main` com o pool, é quem fecha.
+- **Em testes:** `engine, closer, err := app.Build(ctx)` monta a app com o `Init` e devolve o `closer`, que roda o `Close`.
 
 ### Handler, Service, Repository, Model e DTOs
 
@@ -145,7 +201,8 @@ A tag `inject` sem valor também funciona, mas o `go vet` reclama dela. Prefira 
 
 ```go
 type Handler struct {
-	Service *Service `inject:""`
+	Service *Service         `inject:""`
+	Auth    *middleware.Auth `inject:""`
 }
 
 var _ core.Router = (*Handler)(nil) // falha na compilação se Register estiver errado
@@ -153,7 +210,7 @@ var _ core.Router = (*Handler)(nil) // falha na compilação se Register estiver
 func (h *Handler) Register(r gin.IRouter) {
 	g := r.Group("/users")
 	g.POST("", h.create)
-	g.GET("", middleware.Auth, h.list)
+	g.GET("", h.Auth.Handle, h.list)
 }
 ```
 
@@ -220,16 +277,53 @@ Middleware é um `core.Middleware`, que é o mesmo que `gin.HandlerFunc`, e pode
 
 ```go
 // global: internal/preas/preas.go
-var Middlewares = []core.Middleware{gin.Logger(), gin.Recovery()}
+var Middlewares = []core.Middleware{core.RequestLogger, core.Recovery}
 
 // por módulo: vale para todas as rotas do módulo
-var Module = &core.Module{Name: "admin", Middlewares: []core.Middleware{middleware.Auth}, ...}
+var Module = &core.Module{Name: "admin", Middlewares: []core.Middleware{gin.BasicAuth(contas)}, ...}
 
 // por rota
-g.GET("", middleware.Auth, h.list)
+g.GET("", middleware.Owner, h.list)
 ```
 
-A ordem de execução é **global → módulo → rota → handler**. Chame `c.Next()` para continuar ou `c.Abort()` para parar a cadeia. Para criar um, use `prea g m <Nome>`.
+**Middleware com dependências.** Se o middleware precisa de um service ou do banco, transforme-o em componente: uma struct com campos `inject` e um método `func(c *gin.Context)`. Declare a struct nos `Providers` do módulo e injete-a no handler. O `middleware.Auth` do exemplo funciona assim:
+
+```go
+type Auth struct {
+	Sessions Sessions `inject:""` // interface; user.Service a implementa
+}
+
+func (a *Auth) Handle(c *gin.Context) { ... }
+
+// module.go:  Providers: []any{..., middleware.Auth{}, Handler{}}
+// handler.go: g.GET("", h.Auth.Handle, h.list)
+```
+
+Para depender de outro preá sem ciclo de imports, use uma interface, como `Sessions` no exemplo.
+
+A ordem de execução é **segurança → global → módulo → rota → handler**. Chame `c.Next()` para continuar ou `c.Abort()` para parar a cadeia. Para criar um, use `prea g m <Nome>`.
+
+### Logs
+
+O pacote `logger` tem quatro níveis, em ordem: **debug < info < success < error**.
+
+```go
+logger.Debug("cache miss", "key", k)
+logger.Info("enviando e-mail", "to", u.Email)
+logger.Success("usuário criado", "id", u.ID)
+logger.Error("falha no pagamento", "error", err)
+```
+
+```
+time=2026-10-10T03:09:47.989-03:00 level=SUCCESS msg=request method=POST path=/users status=201 latency=18.6ms ip=::1
+```
+
+- **Argumentos** são pares chave/valor. A saída é estruturada (`log/slog`), em texto ou JSON.
+- **`LOG_LEVEL`** define o nível mínimo, e o padrão é `info`. Com `debug`, aparece também a saída do gin (rotas registradas, avisos).
+- **`LOG_FORMAT=json`** é a opção para produção ou para coletores de log.
+- **`logger.Log`** é o `*slog.Logger` por trás e também o default do `slog`. Assim, o `log.Printf` e o `slog.Info` de qualquer lib caem no mesmo lugar. Para um logger próprio, como em testes ou outro destino, use `logger.New(w, level, json)`.
+- **`core.RequestLogger`** gera uma linha por requisição: **success** abaixo de 400, **info** para 4xx e **error** para 5xx. Numa linha de 500 vem junto o erro real que foi passado ao `core.Error`; o cliente só vê "internal server error".
+- **`core.Recovery`** transforma um panic em 500 e loga o erro com a stack trace.
 
 ### Erros e respostas
 
@@ -239,11 +333,96 @@ O service devolve os erros de `common`, com contexto via `fmt.Errorf("%w: ...")`
 |---|---|
 | `common.ErrInvalidInput` | 400 |
 | `common.ErrUnauthorized` | 401 |
+| `common.ErrForbidden` | 403 |
 | `common.ErrNotFound` | 404 |
 | `common.ErrConflict` | 409 |
 | qualquer outro | 500, com mensagem genérica; o erro real vai para o log |
 
 Os erros chegam ao cliente como `{"text": "...", "code": 2}`.
+
+**Respostas.** Todas usam o mesmo envelope `{"text", "code", "data"}`, montado com qualquer combinação de partes. Go não tem overload de métodos; o equivalente aqui é uma função que aceita partes variádicas:
+
+```go
+core.Reply(c, 200, core.Text("salvo"))                           // {"text":"salvo","code":1}
+core.Reply(c, 200, core.Code(core.WarningCode))                  // {"code":2}
+core.Reply(c, 200, core.Text("salvo"), core.Code(core.WarningCode))
+core.Reply(c, 201, core.Text("criado"), core.Data(user))         // {"text":"criado","code":1,"data":{...}}
+core.Reply(c, 200, core.Data(users))                             // {"code":1,"data":[...]}
+
+core.Response(c, 200, qualquerCoisa)                             // formato próprio, sem envelope
+```
+
+Sem `Code`, ele vem do status HTTP: abaixo de 400 é `SuccessCode` (1), abaixo de 500 é `WarningCode` (2) e o resto é `DangerCode` (3). O JSON sai indentado só em modo debug.
+
+### Servidor
+
+Os timeouts ficam em `internal/preas/preas.go`. Um campo zerado usa o padrão:
+
+```go
+var Server = core.Server{
+	ReadHeaderTimeout: 5 * time.Second,   // padrão 5s (proteção contra slowloris)
+	ReadTimeout:       30 * time.Second,  // padrão 30s, corpo incluído
+	WriteTimeout:      30 * time.Second,  // padrão 30s; aumente para streaming e downloads longos
+	IdleTimeout:       120 * time.Second, // padrão 120s, conexões keep-alive
+	ShutdownTimeout:   15 * time.Second,  // padrão 15s, tempo para as requisições em andamento terminarem
+	MaxHeaderBytes:    1 << 20,           // padrão 1 MB
+}
+```
+
+**Subida e desligamento:**
+1. Na subida, o banco recebe um `Ping`, então um DSN errado falha na hora, e não na primeira requisição.
+2. Em SIGINT/SIGTERM, o servidor para de aceitar conexões e espera as requisições em andamento por até `ShutdownTimeout`.
+3. Só depois o pool do banco é fechado. Nenhuma query em andamento perde a conexão.
+4. Se o tempo acaba, as conexões são fechadas e o contexto das requisições é cancelado. Por isso as queries devem usar `c.Request.Context()`.
+5. Um segundo Ctrl+C encerra na hora.
+
+O tamanho do pool de conexões vai no próprio DSN: `?pool_max_conns=20` (o padrão é o maior entre 4 e o número de CPUs).
+
+### Segurança HTTP
+
+A configuração fica em `internal/preas/preas.go` e roda antes de qualquer middleware:
+
+```go
+var Security = core.Security{
+	CORS: &core.CORS{
+		AllowOrigins: []string{"http://localhost:3000"}, // "*" libera qualquer origem
+		// AllowMethods, AllowHeaders, ExposeHeaders, AllowCredentials, MaxAge
+	},
+	CSRF: &core.CSRF{
+		// TrustedOrigins: []string{"https://admin.exemplo.com"},
+		// Bypass:         []string{"POST /webhooks/"},
+	},
+	Headers: core.DefaultHeaders, // nosniff, X-Frame-Options, CSP, HSTS...
+	// TrustedProxies: []string{"10.0.0.0/8"},
+}
+```
+
+| Campo | O que faz | `nil` |
+|---|---|---|
+| `CORS` | responde o preflight (`OPTIONS`) e coloca os headers `Access-Control-*` nas origens permitidas | sem CORS: o navegador bloqueia chamadas de outras origens |
+| `CSRF` | bloqueia com 403 requisições não seguras (POST, PATCH...) vindas de outra origem pelo navegador, usando o `net/http.CrossOriginProtection`; as origens do CORS já são confiáveis; curl e chamadas servidor a servidor passam | sem proteção |
+| `Headers` | headers colocados em toda resposta; use `maps.Clone(core.DefaultHeaders)` para ajustar | nenhum |
+| `TrustedProxies` | proxies cujo `X-Forwarded-For` é aceito no `c.ClientIP()` | nenhum proxy é confiável |
+
+`AllowCredentials` com origem `"*"` é recusado na subida.
+
+**Configurações próprias.** Para casos que o framework não cobre:
+
+```go
+var Security = core.Security{
+	// regra própria de origem (subdomínios, consulta ao banco...); o CSRF também confia nela
+	CORS: &core.CORS{AllowOriginFunc: func(o string) bool { return strings.HasSuffix(o, ".exemplo.com") }},
+
+	// resposta própria quando o CSRF bloqueia (precisa chamar c.Abort)
+	CSRF: &core.CSRF{Deny: func(c *gin.Context) { c.AbortWithStatusJSON(403, gin.H{"erro": "origem"}) }},
+
+	// suas proteções: rodam depois de Headers, CORS e CSRF e antes dos middlewares globais
+	Middlewares: []core.Middleware{middleware.RateLimit, middleware.CSRFToken},
+}
+```
+
+- **Peças avulsas:** `core.Headers(map)`, `(&core.CORS{...}).Middleware()` e `(&core.CSRF{...}).Middleware()` funcionam por módulo ou por rota, por exemplo um CORS diferente só em `/public`.
+- **Desligar uma peça:** deixe o campo `nil` e coloque a sua versão em `Middlewares`, ou use outra lib, como o `gin-contrib/cors`.
 
 ### Autenticação
 
@@ -251,17 +430,21 @@ Os erros chegam ao cliente como `{"text": "...", "code": 2}`.
 |---|---|
 | `POST /auth/login` | recebe `{username, password}` e devolve `{token, payload}` com um JWT HS256 válido por 1h |
 | `POST /auth/validate` | recebe `{token}` e devolve as claims, ou 401 |
-| `middleware.Auth` | exige `Authorization: Bearer <token>` e guarda as claims em `c.Get(middleware.ClaimsKey)` |
+| `POST /auth/logout` | encerra a sessão: o token deixa de valer (204) |
+| `middleware.Auth` | componente; `h.Auth.Handle` exige `Authorization: Bearer <token>` de uma sessão ativa e guarda as claims em `c.Get(middleware.ClaimsKey)` |
+| `middleware.Owner` | depois do `Auth`, só deixa passar se o `:id` da rota for o do usuário logado (403 se não for) |
 
-As senhas são guardadas com hash argon2id.
+As senhas são guardadas com hash argon2id. Os tokens são HS256, e só esse algoritmo é aceito. O `exp` e as outras claims ficam por conta de quem cria o token.
 
-> Existem gaps de segurança conhecidos (`JWTKEY` vazia aceita, `profile` escolhido no cadastro, falta de autorização). Veja o [ROADMAP.md](ROADMAP.md) antes de usar em produção.
+**Sessão revogável.** No login, o `jti` do token é gravado em `users.token`, e o `Auth` só aceita o token cujo `jti` é o ativo. Um novo login invalida o token anterior, e o logout invalida o atual.
+
+> `user` e `auth` são um exemplo, propositalmente simples: o cadastro aceita `profile` e não há rate limit no login.
 
 ## CLI
 
 | Comando | O que faz |
 |---|---|
-| `prea run [-p 8000]` | sobe o servidor (`go run ./cmd/server`); a porta também pode vir de `$PORT` |
+| `prea run [-p 8000]` | compila e sobe o `./cmd/server`, repassando os sinais para o desligamento gracioso; a porta também pode vir de `$PORT` |
 | `prea g p <Nome>` | cria `internal/preas/<nome>/` (module, handler, service, repository, model e dtos) e registra o módulo em `preas.go` |
 | `prea g m <Nome>` | cria `internal/middleware/<nome>.go` |
 
@@ -276,8 +459,11 @@ As variáveis podem vir do ambiente ou de um `.env` na raiz (veja o `.env.exampl
 | Variável | Uso |
 |---|---|
 | `PGCONN` | DSN do Postgres, ex.: `postgres://user:pass@localhost:5432/prea` |
-| `JWTKEY` | segredo do JWT; **obrigatório na prática**, use 32+ bytes aleatórios |
+| `JWTKEY` | segredo do JWT, com 32+ bytes; **obrigatório** se a app usa o pacote `security`, ou ela não sobe |
 | `PORT` | porta HTTP (padrão `8000`) |
+| `GIN_MODE` | `debug` (padrão), `release` ou `test`; use `release` em produção. Pode ficar no `.env` |
+| `LOG_LEVEL` | `debug`, `info` (padrão), `success` ou `error`; um valor inválido impede a subida |
+| `LOG_FORMAT` | `text` (padrão) ou `json` |
 
 ## Testes
 

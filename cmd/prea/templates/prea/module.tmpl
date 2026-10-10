@@ -8,8 +8,8 @@ import (
 var Module = &core.Module{
 	Name: "{{.Pkg}}",
 	Providers: []any{
-		new(Repository),
-		di.Export(new(Service)),
-		new(Handler),
+		Repository{},
+		di.Export(Service{}),
+		Handler{},
 	},
 }

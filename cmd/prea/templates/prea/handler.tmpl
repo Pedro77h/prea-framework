@@ -33,7 +33,7 @@ func (h *Handler) list(c *gin.Context) {
 		core.Error(c, err)
 		return
 	}
-	core.Response(c, http.StatusOK, items)
+	core.Reply(c, http.StatusOK, core.Data(items))
 }
 
 func (h *Handler) get(c *gin.Context) {
@@ -42,7 +42,7 @@ func (h *Handler) get(c *gin.Context) {
 		core.Error(c, err)
 		return
 	}
-	core.Response(c, http.StatusOK, item)
+	core.Reply(c, http.StatusOK, core.Data(item))
 }
 
 func (h *Handler) create(c *gin.Context) {
@@ -57,7 +57,7 @@ func (h *Handler) create(c *gin.Context) {
 		core.Error(c, err)
 		return
 	}
-	core.Response(c, http.StatusCreated, item)
+	core.Reply(c, http.StatusCreated, core.Data(item))
 }
 
 func (h *Handler) update(c *gin.Context) {
@@ -72,7 +72,7 @@ func (h *Handler) update(c *gin.Context) {
 		core.Error(c, err)
 		return
 	}
-	core.Response(c, http.StatusOK, item)
+	core.Reply(c, http.StatusOK, core.Data(item))
 }
 
 func (h *Handler) delete(c *gin.Context) {

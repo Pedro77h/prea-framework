@@ -7,12 +7,12 @@ import (
 	"strings"
 )
 
-func injectFields(v reflect.Value, scopes [][]any) error {
+func injectFields(v reflect.Value, scopes [][]component, deps *[]any) error {
 	for i := range v.NumField() {
 		field, value := v.Type().Field(i), v.Field(i)
 
 		if field.Anonymous && field.Type.Kind() == reflect.Struct {
-			if err := injectFields(value, scopes); err != nil {
+			if err := injectFields(value, scopes, deps); err != nil {
 				return err
 			}
 			continue
@@ -25,11 +25,12 @@ func injectFields(v reflect.Value, scopes [][]any) error {
 		if !value.CanSet() {
 			return fmt.Errorf("%s must be exported to be injected", name)
 		}
-		dep, err := resolve(field.Type, scopes)
+		dep, err := resolve(field.Type, field.Tag.Get("inject"), scopes)
 		if err != nil {
 			return fmt.Errorf("%s: %w", name, err)
 		}
 		value.Set(reflect.ValueOf(dep))
+		*deps = append(*deps, dep)
 	}
 	return nil
 }
@@ -39,25 +40,38 @@ func wantsInjection(field reflect.StructField) bool {
 	return tagged || slices.Contains(strings.Fields(string(field.Tag)), "inject")
 }
 
-func resolve(t reflect.Type, scopes [][]any) (any, error) {
+func resolve(t reflect.Type, name string, scopes [][]component) (any, error) {
 	for _, scope := range scopes {
-		dep, found, err := find(t, scope)
+		dep, found, err := find(t, name, scope)
 		if found || err != nil {
 			return dep, err
 		}
 	}
-	return nil, fmt.Errorf("no provider for %v", t)
+	return nil, fmt.Errorf("no provider for %v%s", t, describe(name))
 }
 
-func find(t reflect.Type, scope []any) (dep any, found bool, err error) {
-	var candidates []any
+func find(t reflect.Type, name string, scope []component) (dep any, found bool, err error) {
+	var exact, implementers []component
 	for _, p := range scope {
-		pt := reflect.TypeOf(p)
-		if pt == t {
-			return p, true, nil
+		if p.value == nil || name != "" && p.name != name {
+			continue
 		}
-		if t.Kind() == reflect.Interface && pt.Implements(t) {
-			candidates = append(candidates, p)
+		pt := reflect.TypeOf(p.value)
+		switch {
+		case pt == t:
+			exact = append(exact, p)
+		case t.Kind() == reflect.Interface && pt.Implements(t):
+			implementers = append(implementers, p)
+		}
+	}
+
+	candidates := exact
+	if len(candidates) == 0 {
+		candidates = implementers
+	}
+	if name == "" {
+		if unnamed := slices.DeleteFunc(slices.Clone(candidates), func(p component) bool { return p.name != "" }); len(unnamed) > 0 {
+			candidates = unnamed
 		}
 	}
 
@@ -65,8 +79,15 @@ func find(t reflect.Type, scope []any) (dep any, found bool, err error) {
 	case 0:
 		return nil, false, nil
 	case 1:
-		return candidates[0], true, nil
+		return candidates[0].value, true, nil
 	default:
-		return nil, true, fmt.Errorf("%d providers implement %v", len(candidates), t)
+		return nil, true, fmt.Errorf(`%d providers for %v: name them with di.Named and pick one with inject:"<name>"`, len(candidates), t)
 	}
+}
+
+func describe(name string) string {
+	if name == "" {
+		return ""
+	}
+	return fmt.Sprintf(" named %q", name)
 }

@@ -2,7 +2,7 @@
 
 Este documento tem duas partes: os **gaps** do que já foi implementado (levantados lendo o código em 2026-10-10) e os **próximos passos** planejados, com uma proposta de desenho para cada um.
 
-Severidade dos gaps: **Alta** = risco de segurança ou perda de dados; **Média** = afeta produção ou uso real; **Baixa** = qualidade ou ergonomia.
+Severidade dos gaps: **Crítica** = quebra o isolamento ou a correção do framework; **Alta** = risco de segurança ou perda de dados; **Média** = afeta produção ou uso real; **Baixa** = qualidade ou ergonomia.
 
 ---
 
@@ -12,40 +12,73 @@ Severidade dos gaps: **Alta** = risco de segurança ou perda de dados; **Média*
 
 | Sev. | Gap | Onde |
 |---|---|---|
-| Alta | `JWTKEY` vazia é aceita: os tokens são assinados com chave vazia e qualquer um consegue forjar um token válido. | `security/jwt.go` (`init`) |
-| Alta | O cadastro deixa o próprio usuário escolher o `profile` (`POST /users` com `"profile": 1`), ou seja, escalação de privilégio. | `internal/preas/user/dtos/create_request.go` |
-| Alta | Só existe autenticação, não autorização: qualquer usuário logado lista, edita e apaga qualquer outro e vê os e-mails de todos. | `internal/preas/user/handler.go` |
-| Alta | `DecodeToken` aceita token **sem `exp`** (não expira nunca) e não restringe o algoritmo (`jwt.WithValidMethods`). | `security/jwt.go` |
-| Média | Login sem rate limit nem bloqueio, e responde mais rápido quando o usuário não existe (enumeração por tempo de resposta). | `internal/preas/auth/service.go` |
-| Média | Sem refresh token e sem revogação; a coluna `users.token` existe mas ninguém usa. | `auth`, `user/model.go` |
-| Média | As rotas geradas pelo template são públicas por padrão. | `cmd/prea/templates/prea/handler.tmpl` |
-| Média | Sem CORS e sem headers de segurança; o gin confia em todos os proxies e roda em modo debug (os dois avisos aparecem na subida). | `core/app.go` |
+| Baixa | Sem refresh token: quando o token expira, é preciso fazer login de novo. | `auth` |
+
+**Resolvidos:**
+- A `JWTKEY` é obrigatória, com pelo menos 32 bytes. Sem ela, a app não sobe (o `init` do `security` faz panic) e `CreateToken`/`DecodeToken` devolvem erro. Em `go test` não há panic; o teste define `security.SignKey`.
+- `DecodeToken` aceita só HS256 (`jwt.WithValidMethods`).
+- CORS, CSRF (via `net/http.CrossOriginProtection`), headers de segurança e proxies confiáveis são configurados em `core.Security` no `preas.go`. Por padrão, nenhum proxy é confiável.
+- Foi criado o `ErrForbidden` (403). O exemplo tem o `middleware.Owner`: só o dono altera ou apaga o próprio usuário.
+- Revogação: o `jti` do token fica em `users.token` e o `middleware.Auth` confere com o banco. Um novo login invalida o token anterior, e existe o `POST /auth/logout`.
+- O `GIN_MODE` é lido do ambiente e do `.env`. Antes, o gin lia a variável antes de o `.env` ser carregado.
+
+**Decisões (não são gaps):**
+- O cadastro com `profile`, a listagem aberta para quem está logado e o login sem rate limit fazem parte do exemplo, que é propositalmente simples.
+- Quem decide se o token tem `exp` é quem codifica o token.
+- As rotas geradas são públicas; para fechá-las, use um middleware.
 
 ### Servidor (`core`)
 
 | Sev. | Gap | Onde |
 |---|---|---|
-| Média | Sem graceful shutdown: `engine.Run` derruba as requisições em andamento no SIGTERM, e o `defer db.Close()` nunca roda. | `core/app.go`, `cmd/server/main.go` |
-| Média | Sem timeouts no `http.Server` (`ReadHeaderTimeout` etc.), o que deixa o servidor exposto a slowloris. | `core/app.go` |
-| Média | O banco não é testado na subida (sem `Ping`): um DSN errado só aparece na primeira requisição. | `cmd/server/main.go` |
-| Baixa | O formato das respostas é inconsistente: sucesso devolve o dado cru, erro devolve `{text, code}`. `DataMessage` e `SuccessCode` não são usados. As respostas usam `IndentedJSON` também em produção. | `core/responses.go` |
-| Baixa | Erros de validação devolvem a mensagem crua do validator (`Key: 'CreateRequest.Email' Error:Field validation...`). | handlers |
-| Baixa | Faltam health check, request id, logs estruturados (`slog`) e métricas; também falta `ErrForbidden` (403). | `core`, `common` |
+| Baixa | Erros de validação devolvem a mensagem crua do validator (`Key: 'CreateRequest.Email' Error:Field validation...`). Ver o passo 8. | handlers |
+
+**Resolvidos:**
+- Graceful shutdown (`core/server.go`): no SIGINT/SIGTERM o servidor para de aceitar conexões, espera as requisições em andamento (`ShutdownTimeout`) e só então retorna, então o pool do banco fecha depois. Se o tempo acaba, as conexões são fechadas e os contextos das requisições são cancelados. Testado com `-race`. O `prea run` roda o binário direto, porque o `go run` não repassa SIGTERM.
+- Os timeouts do `http.Server` são configuráveis em `preas.Server` e têm padrões seguros.
+- O banco recebe um `Ping` na subida, com timeout de 5s.
+- Respostas: o envelope `{text, code, data}` é montado com `core.Reply` e partes (`Text`, `Code`, `Data`); o `core.Response` serve para formatos próprios. O JSON só sai indentado em modo debug.
+- Logs: o pacote `logger` (slog) tem os níveis debug, info, success e error, configurados por `LOG_LEVEL` e `LOG_FORMAT`. O `core.RequestLogger` escolhe o nível pelo status e loga o erro real dos 500, e o `core.Recovery` loga panics com stack. A saída do gin vira debug.
+- A config de segurança (headers, origens) é copiada quando o middleware é criado, então alterá-la depois não gera data race.
+
+**Decisões (não são gaps):** health check, request id e métricas dependem da aplicação, e o usuário cria como módulo ou middleware.
 
 ### Configuração
 
 | Sev. | Gap | Onde |
 |---|---|---|
-| Média | Variáveis de ambiente (`PGCONN`, `JWTKEY`, `PORT`) lidas em lugares diferentes e sem validação; o `.env` é carregado por um import com efeito colateral; não existem profiles. | `common/env.go`, `security/jwt.go`, `cmd/server/main.go` |
+| Média | As variáveis de ambiente (`PGCONN`, `JWTKEY`, `PORT`, `GIN_MODE`, `LOG_LEVEL`, `LOG_FORMAT`) são lidas em lugares diferentes, e o `.env` é carregado por um import com efeito colateral. | `common/env.go`, `security/jwt.go`, `logger`, `core/app.go`, `cmd/server/main.go` |
+
+**Decisão:** este gap será resolvido pelos **prea profiles** (passo 1). Até lá, nada muda aqui, para não criar uma camada de config que seria substituída logo depois.
 
 ### Injeção de dependência (`di`)
 
 | Sev. | Gap | Onde |
 |---|---|---|
-| Média | Os módulos são variáveis de pacote, então os componentes são singletons do processo. Um segundo `App` (em testes, por exemplo) reaproveita as instâncias, e como um campo já preenchido é mantido, **continua com as dependências do primeiro container**. | `di/inject.go`, `*/module.go` |
-| Média | Não há providers por construtor nem por valor (config, clients), nem qualificadores (impossível ter dois `*pgxpool.Pool`), nem ciclo de vida (`Init`/`Close`), nem escopo por request. | `di` |
-| Baixa | Middlewares são funções puras e não recebem injeção. | `core/module.go` |
+| Baixa | Não existe provider "valor pronto" por módulo: uma instância já criada fora do container, como um client configurado no `main`, só entra em `Globals`, que é visível para todos os módulos. Na maioria dos casos o `Init` resolve: o próprio componente cria o client. | `di` |
+| Baixa | Um middleware só recebe injeção como componente (struct nos `Providers` e injetada no handler), então não dá para usá-lo em `Module.Middlewares`, que monta antes do container. | `core/module.go` |
 | Baixa | A tag `inject` sem valor funciona, mas o `go vet` reclama dela; só `inject:""` passa limpo. | `di/inject.go` |
+
+**Resolvidos:**
+- **Ciclo de vida:**
+  - hooks opcionais `Init(ctx) error` e `Close(ctx) error`/`io.Closer`;
+  - o `Init` roda na ordem das dependências, inclusive entre módulos, e o `Close` na ordem inversa, no desligamento gracioso e antes do pool do banco fechar;
+  - se um `Init` falha, a app não sobe e o que já tinha iniciado é fechado;
+  - o `Init` cobre o caso de "provider por construtor": lógica de criação que pode falhar;
+  - para testes, existe o `core.App.Build(ctx)`, que devolve o engine e o `closer`.
+- **Componentes nomeados**, no estilo dos tokens do Angular:
+  - `di.Named("analytics", x)` em providers e globals, e `inject:"analytics"` no campo;
+  - `inject:""` prefere o componente sem nome;
+  - **comportamento corrigido:** antes, com dois candidatos do mesmo tipo, o primeiro era escolhido em silêncio. Agora isso é erro na subida, e a mensagem pede um nome.
+
+**Resolvido (Crítica):**
+- **O problema:** os módulos são variáveis de pacote, e os providers eram instâncias criadas uma vez por processo (`new(Repository)`). Um segundo `App` reaproveitava as instâncias, e como campos já preenchidos são mantidos, continuava com as dependências do primeiro container, sem erro nenhum. Dois containers em paralelo escreviam nos mesmos campos, o que é uma data race.
+- **A solução:** os providers passaram a ser declarados como valor (`Repository{}`) e funcionam como molde. A cada `Load`, o container cria a instância com `reflect.New` e copia o molde. O módulo vira só declaração e nunca é alterado. Declarar um ponteiro dá erro com a correção na mensagem.
+- **Testes:**
+  - `di.TestIsolation`: 8 containers em paralelo com `-race`, cada um com o seu banco, nenhum componente compartilhado e a declaração intacta;
+  - `core.TestAppsAreIsolated`: dois `App` montados a partir do mesmo módulo. Esse teste falha no código antigo (`app with "test" answered "prod"`).
+
+**Plano futuro:** escopo por request no container, um componente novo por requisição como no `@RequestScope` do Spring. Por enquanto o framework só tem singletons por container, e o estado de requisição vai no `context.Context`/`gin.Context`, como as claims do `Auth`.
 
 ### Banco (`database`)
 
@@ -73,7 +106,7 @@ Severidade dos gaps: **Alta** = risco de segurança ou perda de dados; **Média*
 
 | Sev. | Gap | Onde |
 |---|---|---|
-| Baixa | Código morto em `common` (`Stoi64`, `ThrowException`, `MakeLogger`, `ILogger`), e o nome `common` é genérico demais. | `common` |
+| Baixa | Código morto em `common` (`Stoi64`, `ThrowException`), e o nome `common` é genérico demais. | `common` |
 | Baixa | A app de exemplo (`internal/preas`) mora dentro do repositório do framework. | `internal` |
 | Baixa | `middleware.Auth` depende de `auth/dtos`, um acoplamento entre preás. | `internal/middleware/auth.go` |
 | Baixa | Sem testes de services e handlers de `user`/`auth`; o teste de integração do banco só roda com env; não há CI nem docker-compose para Postgres local. | — |
@@ -125,7 +158,7 @@ type User struct {
 ```
 - `prea g migration --from-models` compara os models com o schema atual (introspecção) e gera o `up`/`down` em `migrations/`, para revisar antes de aplicar.
 - De quebra resolve a PK fixa: `pk` define a chave primária.
-- Outras tags possíveis: `inject:"nome"` (qualificador), `value:"chave"` (config) e `profile:"dev"`.
+- Outras tags possíveis: `value:"chave"` (config) e `profile:"dev"`. O `inject:"nome"` já existe.
 
 **Decisões em aberto:** estender a tag `db` ou criar uma tag `column` separada; como representar rename de coluna, que um diff não consegue detectar.
 
@@ -137,7 +170,7 @@ type User struct {
 - O `database` passa a definir só interfaces. Cada driver vira um módulo separado, para que o projeto baixe apenas o driver que usa: `database/postgres` (pgx), `database/mysql`, `database/sqlite` e `database/mongo`.
 - No SQL, um `Dialect` cuida das diferenças: placeholders (`$1` ou `?`), quoting (`"` ou `` ` ``) e `RETURNING` (o MySQL não tem). Os parâmetros `@nome` do `Prepare` são traduzidos para o dialeto.
 - No NoSQL, a parte comum é a interface do `BaseRepository` (`GetAll`, `GetByID`, `Where`, `First`, `Create`, `Update`, `Delete` com filtro `Args`, que vira `bson.M` no Mongo). O `Prepare` (estilo PDO) continua só no SQL; o Mongo expõe a collection nativa para consultas próprias.
-- Conexões nomeadas na config (`database.main`, `database.analytics`) e injetadas com qualificador (`inject:"analytics"`).
+- Conexões nomeadas na config (`database.main`, `database.analytics`) e injetadas pelo nome (`di.Named` + `inject:"analytics"`, que já existem).
 - Cada driver traduz os próprios erros para os erros do framework (`ErrConflict`, `ErrNotFound`...).
 - Os métodos do repositório passam a aceitar transação (`repo.WithTx(tx)` ou o contexto carregando a tx).
 
@@ -186,7 +219,7 @@ package main
 func main() {
 	prea.Run(prea.Config{
 		Modules:     []*core.Module{user.Module, auth.Module},
-		Middlewares: []core.Middleware{gin.Logger(), gin.Recovery()},
+		Middlewares: []core.Middleware{core.RequestLogger, core.Recovery},
 	})
 }
 ```
@@ -200,22 +233,46 @@ func main() {
 **Objetivo:** sair do "JWT + argon2 básico" para algo seguro por padrão.
 
 **Proposta, por prioridade:**
-1. **Corrigir os gaps Alta**: segredo obrigatório e longo, validado na subida; `exp` obrigatório; `jwt.WithValidMethods`; `profile` fora do cadastro.
-2. **Autorização**: `middleware.Require("admin")` com papéis e permissões vindos das claims, e `ErrForbidden` (403).
+1. ~~Segredo obrigatório e validado na subida; `jwt.WithValidMethods`.~~ Feito.
+2. **Autorização**: `middleware.Require("admin")` com papéis e permissões vindos das claims (o `ErrForbidden` já existe).
 3. **Tokens**: issuer/audience e TTL configuráveis; refresh token com rotação; revogação por `jti` (blacklist ou versão do token no usuário).
 4. **Chaves**: suporte a RS256/EdDSA e rotação por `kid`.
 5. **Senhas**: parâmetros do argon2 configuráveis; *rehash* no login quando os parâmetros mudam; política mínima de senha; hash fictício para usuário inexistente, deixando o tempo de resposta igual.
-6. **Proteções HTTP**: rate limit e bloqueio no login, CORS configurável, headers de segurança, CSRF quando houver cookie.
+6. **Proteções HTTP**: CORS, CSRF e headers já existem em `core.Security`; falta um middleware de rate limit.
 7. Um getter tipado para as claims (`security.Claims(c)`) no lugar de `c.Get("claims")`.
+
+### 8. Validação de structs
+
+**Objetivo:** validar DTOs e configs com um formato de erro padrão e legível, independente do gin.
+
+**Hoje:** a validação é a do gin (`binding:"required,email"`, via go-playground/validator). Ela só roda no `ShouldBind`, e o erro sai cru, com o nome da struct Go.
+
+**Proposta:**
+- Um pacote `validate` com `validate.Struct(v) error`. O erro devolvido envolve `ErrInvalidInput` e traz a lista de campos:
+  ```json
+  {"text": "invalid input", "code": 2, "data": {"email": "must be a valid email", "name": "required"}}
+  ```
+- **Nomes dos campos** vêm da tag `json` (`email`, não `Email`), e há uma mensagem por regra, traduzível (pt/en).
+- **Tag `validate:"..."`** própria do framework, separada do `binding` do gin, para funcionar fora do HTTP: services, configs (passo 1), jobs e mensagens de fila.
+- **Integração:**
+  - um `core.Bind(c, &req) error`, que faz bind e validação com o erro já no formato acima;
+  - o `core.Error` reconhece o erro de validação e coloca os campos em `data`.
+- **Regras próprias:** `validate.Register("cpf", fn)`. A validação de struct inteira, como `DataFim > DataInicio`, fica num método opcional `Validate() error` no DTO, que o framework chama depois das tags.
+- **Configs:** validar a config na subida com as mesmas tags, por exemplo `validate:"required,min=32"` na chave do JWT.
+
+**Decisões em aberto:** usar o go-playground/validator por baixo (que o gin já traz) ou motor próprio; e se `binding` continua aceito como alias.
+
+**Depende de:** nada; a parte de configs combina com o passo 1.
 
 ### Ordem sugerida
 
-0. **Gaps de severidade Alta** (passo 7.1). São pequenos e não dependem de nada.
+0. ~~Gaps de segurança~~ (feito).
 1. **Config e profiles**: base para segredos, banco, migrations e `prea.go`.
 2. **Migrations**: logo se torna necessário, e o runner também é usado pelo passo 3.
 3. **Separação em módulos e `prea.go`**: estabiliza a fronteira entre framework e usuário antes de crescer a API.
 4. **Multi-banco**: os drivers já nascem como módulos separados.
 5. **Tags de schema e geração de migrations**: depende de migrations e dos dialetos.
 6. **Segurança**: o restante do passo 7.
+7. **Validação de structs** (passo 8): independente; pode entrar antes, se o formato de erro for prioridade.
 
 Os gaps de severidade Média de servidor e DI (graceful shutdown, timeouts, `Ping`, singletons) entram junto do `prea.Run` no passo 3.

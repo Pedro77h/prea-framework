@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"prea/common"
@@ -33,16 +34,18 @@ func (s *Service) Login(ctx context.Context, username, password string) (dtos.Se
 	}
 
 	now := time.Now()
-	if err := s.Users.TouchLastLogin(ctx, u.ID, now); err != nil {
+	tokenID := rand.Text()
+	if err := s.Users.StartSession(ctx, u.ID, tokenID, now); err != nil {
 		return dtos.Session{}, err
 	}
 
 	// LastLogin carries the previous login, before this one.
-	payload := dtos.Payload{Username: u.Username, Profile: u.Profile, LastLogin: u.LastLogin}
+	payload := dtos.Payload{ID: u.ID, Username: u.Username, Profile: u.Profile, LastLogin: u.LastLogin}
 	claims := jwt.RegisteredClaims{
 		IssuedAt:  jwt.NewNumericDate(now),
 		ExpiresAt: jwt.NewNumericDate(now.Add(tokenTTL)),
 		Subject:   u.Username,
+		ID:        tokenID,
 	}
 
 	token, err := security.Jwt[dtos.Payload]{}.CreateToken(payload, claims)
@@ -52,10 +55,17 @@ func (s *Service) Login(ctx context.Context, username, password string) (dtos.Se
 	return dtos.Session{Token: token, Payload: payload}, nil
 }
 
-func (s *Service) Validate(token string) (security.DataClaims[dtos.Payload], error) {
+func (s *Service) Validate(ctx context.Context, token string) (security.DataClaims[dtos.Payload], error) {
 	claims, err := security.Jwt[dtos.Payload]{}.DecodeToken(token)
 	if err != nil {
 		return claims, fmt.Errorf("%w: invalid token", common.ErrUnauthorized)
 	}
+	if active, err := s.Users.ActiveToken(ctx, claims.Payload.ID); err != nil || active != claims.ID {
+		return claims, fmt.Errorf("%w: session ended", common.ErrUnauthorized)
+	}
 	return claims, nil
+}
+
+func (s *Service) Logout(ctx context.Context, userID string) error {
+	return s.Users.EndSession(ctx, userID)
 }

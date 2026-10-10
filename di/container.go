@@ -1,25 +1,42 @@
 package di
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"io"
 	"reflect"
 )
 
+type component struct {
+	value any
+	name  string
+}
+
 type Container struct {
-	globals   []any
+	globals   []component
 	order     []Declarer
-	providers map[Declarer][]any
-	exports   map[Declarer][]any
+	providers map[Declarer][]component
+	exports   map[Declarer][]component
 	loading   map[Declarer]bool
+	owned     map[any]bool
+	deps      map[any][]any
+	started   []any
 }
 
 func New(globals ...any) *Container {
-	return &Container{
-		globals:   globals,
-		providers: map[Declarer][]any{},
-		exports:   map[Declarer][]any{},
+	c := &Container{
+		providers: map[Declarer][]component{},
+		exports:   map[Declarer][]component{},
 		loading:   map[Declarer]bool{},
+		owned:     map[any]bool{},
+		deps:      map[any][]any{},
 	}
+	for _, g := range globals {
+		value, name, _ := unwrap(g)
+		c.globals = append(c.globals, component{value, name})
+	}
+	return c
 }
 
 func (c *Container) Modules() []Declarer {
@@ -27,7 +44,11 @@ func (c *Container) Modules() []Declarer {
 }
 
 func (c *Container) Providers(m Declarer) []any {
-	return c.providers[m]
+	values := make([]any, len(c.providers[m]))
+	for i, p := range c.providers[m] {
+		values[i] = p.value
+	}
+	return values
 }
 
 func (c *Container) Load(modules ...Declarer) error {
@@ -55,15 +76,24 @@ func (c *Container) load(m Declarer) error {
 		return err
 	}
 
-	providers, exports, err := unpack(spec.Providers)
+	providers, exports, err := instantiate(spec.Providers)
 	if err != nil {
 		return fmt.Errorf("di: module %s: %w", spec.Name, err)
 	}
-
-	scopes := [][]any{providers, imported, c.globals}
 	for _, p := range providers {
-		if err := injectFields(reflect.ValueOf(p).Elem(), scopes); err != nil {
+		c.owned[p.value] = true
+	}
+
+	scopes := [][]component{providers, imported, c.globals}
+	for _, p := range providers {
+		var deps []any
+		if err := injectFields(reflect.ValueOf(p.value).Elem(), scopes, &deps); err != nil {
 			return fmt.Errorf("di: module %s: %w", spec.Name, err)
+		}
+		for _, d := range deps {
+			if c.owned[d] {
+				c.deps[p.value] = append(c.deps[p.value], d)
+			}
 		}
 	}
 
@@ -73,8 +103,8 @@ func (c *Container) load(m Declarer) error {
 	return nil
 }
 
-func (c *Container) loadImports(spec *Module) ([]any, error) {
-	var imported []any
+func (c *Container) loadImports(spec *Module) ([]component, error) {
+	var imported []component
 	for _, imp := range spec.Imports {
 		if err := c.load(imp); err != nil {
 			return nil, err
@@ -84,23 +114,31 @@ func (c *Container) loadImports(spec *Module) ([]any, error) {
 	return imported, nil
 }
 
-func unpack(declared []any) (providers, exports []any, err error) {
-	seen := map[reflect.Type]bool{}
+func instantiate(declared []any) (providers, exports []component, err error) {
+	type key struct {
+		t    reflect.Type
+		name string
+	}
+	seen := map[key]bool{}
 
-	for _, p := range declared {
-		e, isExported := p.(exported)
-		if isExported {
-			p = e.provider
-		}
+	for _, d := range declared {
+		value, name, isExported := unwrap(d)
 
-		t := reflect.TypeOf(p)
-		if t == nil || t.Kind() != reflect.Pointer || t.Elem().Kind() != reflect.Struct {
-			return nil, nil, fmt.Errorf("provider %v must be a pointer to struct", t)
+		t := reflect.TypeOf(value)
+		if t != nil && t.Kind() == reflect.Pointer && t.Elem().Kind() == reflect.Struct {
+			return nil, nil, fmt.Errorf("provider %v must be declared as a value, %v{}: each container creates its own instance", t, t.Elem())
 		}
-		if seen[t] {
-			return nil, nil, fmt.Errorf("duplicate provider %v", t)
+		if t == nil || t.Kind() != reflect.Struct {
+			return nil, nil, fmt.Errorf("provider %v must be a struct value", t)
 		}
-		seen[t] = true
+		if seen[key{t, name}] {
+			return nil, nil, fmt.Errorf("duplicate provider %v%s", t, describe(name))
+		}
+		seen[key{t, name}] = true
+
+		instance := reflect.New(t)
+		instance.Elem().Set(reflect.ValueOf(value))
+		p := component{instance.Interface(), name}
 
 		providers = append(providers, p)
 		if isExported {
@@ -108,4 +146,54 @@ func unpack(declared []any) (providers, exports []any, err error) {
 		}
 	}
 	return providers, exports, nil
+}
+
+func (c *Container) Init(ctx context.Context) error {
+	visited := map[any]bool{}
+	var visit func(p any) error
+	visit = func(p any) error {
+		if visited[p] {
+			return nil
+		}
+		visited[p] = true
+		for _, d := range c.deps[p] {
+			if err := visit(d); err != nil {
+				return err
+			}
+		}
+		if i, ok := p.(Initializer); ok {
+			if err := i.Init(ctx); err != nil {
+				return fmt.Errorf("di: %T.Init: %w", p, err)
+			}
+		}
+		c.started = append(c.started, p)
+		return nil
+	}
+
+	for _, m := range c.order {
+		for _, p := range c.providers[m] {
+			if err := visit(p.value); err != nil {
+				return errors.Join(err, c.Close(ctx))
+			}
+		}
+	}
+	return nil
+}
+
+func (c *Container) Close(ctx context.Context) error {
+	var errs []error
+	for i := len(c.started) - 1; i >= 0; i-- {
+		var err error
+		switch p := c.started[i].(type) {
+		case Closer:
+			err = p.Close(ctx)
+		case io.Closer:
+			err = p.Close()
+		}
+		if err != nil {
+			errs = append(errs, fmt.Errorf("di: %T.Close: %w", c.started[i], err))
+		}
+	}
+	c.started = nil
+	return errors.Join(errs...)
 }

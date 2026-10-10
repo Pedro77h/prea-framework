@@ -1,6 +1,10 @@
 package core
 
 import (
+	"context"
+	"errors"
+	"os"
+
 	"prea/di"
 
 	"github.com/gin-gonic/gin"
@@ -12,22 +16,45 @@ type Router interface {
 }
 
 // App wires modules through the di container and serves their routes.
-// Middlewares run on every request; Globals are injectable in every module.
+// Security runs first, then Middlewares, on every request; Globals are
+// injectable in every module.
 type App struct {
 	Modules     []*Module
+	Security    Security
+	Server      Server
 	Middlewares []Middleware
 	Globals     []any
 }
 
-func (a App) Engine() (*gin.Engine, error) {
+// Build loads the modules, runs the components' Init (dependencies first)
+// and mounts their routes. closer runs their Close in reverse order; call it
+// once the engine stops serving. Globals are not closed: their owner does it.
+func (a App) Build(ctx context.Context) (engine *gin.Engine, closer func(context.Context) error, err error) {
 	c := di.New(a.Globals...)
 	for _, m := range a.Modules {
 		if err := c.Load(m); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
+	if err := c.Init(ctx); err != nil {
+		return nil, nil, err
+	}
+	engine, err = a.engine(c)
+	if err != nil {
+		return nil, nil, errors.Join(err, c.Close(ctx))
+	}
+	return engine, c.Close, nil
+}
 
+func (a App) engine(c *di.Container) (*gin.Engine, error) {
+	// gin reads GIN_MODE before the .env is loaded, so read it again here.
+	if mode := os.Getenv(gin.EnvGinMode); mode != "" {
+		gin.SetMode(mode)
+	}
 	engine := gin.New()
+	if err := a.Security.apply(engine); err != nil {
+		return nil, err
+	}
 	engine.Use(a.Middlewares...)
 
 	for _, m := range c.Modules() {
@@ -42,12 +69,4 @@ func (a App) Engine() (*gin.Engine, error) {
 		}
 	}
 	return engine, nil
-}
-
-func (a App) Run(addr string) error {
-	engine, err := a.Engine()
-	if err != nil {
-		return err
-	}
-	return engine.Run(addr)
 }

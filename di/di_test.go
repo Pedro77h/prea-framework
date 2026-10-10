@@ -1,8 +1,10 @@
 package di
 
 import (
+	"fmt"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -34,20 +36,23 @@ type Consumer struct {
 func TestLoad(t *testing.T) {
 	db := &DB{"pg"}
 	manual := &Repo{}
-	svc := &Service{Manual: manual}
-	users := &Module{Name: "users", Providers: []any{new(Repo), Export(svc)}}
-	other := &Module{Name: "other", Imports: []Declarer{users}, Providers: []any{new(Consumer)}}
+	users := &Module{Name: "users", Providers: []any{Repo{}, Export(Service{Manual: manual})}}
+	other := &Module{Name: "other", Imports: []Declarer{users}, Providers: []any{Consumer{}}}
 
 	c := New(db)
 	if err := c.Load(other, users); err != nil {
 		t.Fatal(err)
 	}
 
+	svc := c.Providers(users)[1].(*Service)
 	if svc.Repo == nil || svc.Repo.DB != db || svc.G != svc.Repo {
 		t.Fatalf("bad injection: %+v", svc)
 	}
+	if svc.Repo != c.Providers(users)[0] {
+		t.Fatal("injection must use the container's own instance")
+	}
 	if svc.Manual != manual || svc.Untagged != nil {
-		t.Fatal("must keep manual values and skip untagged fields")
+		t.Fatal("must keep values set in the declaration and skip untagged fields")
 	}
 	if got := c.Providers(other)[0].(*Consumer).Svc; got != svc {
 		t.Fatal("import must reuse the same singleton")
@@ -57,24 +62,63 @@ func TestLoad(t *testing.T) {
 	}
 }
 
+// Modules are package-level declarations: every container must build its own
+// components from them, and leave the declaration untouched.
+func TestIsolation(t *testing.T) {
+	template := Service{}
+	users := &Module{Name: "users", Providers: []any{Repo{}, Export(template)}}
+	other := &Module{Name: "other", Imports: []Declarer{users}, Providers: []any{Consumer{}}}
+
+	containers := make([]*Container, 8)
+	var wg sync.WaitGroup
+	for i := range containers {
+		wg.Go(func() {
+			c := New(&DB{fmt.Sprint(i)})
+			if err := c.Load(other); err != nil {
+				t.Error(err)
+			}
+			containers[i] = c
+		})
+	}
+	wg.Wait()
+
+	seen := map[*Service]bool{}
+	for i, c := range containers {
+		svc := c.Providers(other)[0].(*Consumer).Svc
+		if svc.Repo.DB.Name != fmt.Sprint(i) {
+			t.Errorf("container %d got the database of container %s", i, svc.Repo.DB.Name)
+		}
+		if seen[svc] {
+			t.Errorf("container %d shares a component with another container", i)
+		}
+		seen[svc] = true
+	}
+	if template.Repo != nil || users.Providers[0].(Repo).DB != nil {
+		t.Fatal("the declaration must never be modified")
+	}
+}
+
 func TestErrors(t *testing.T) {
-	notExported := &Module{Name: "a", Providers: []any{new(Repo)}}
+	notExported := &Module{Name: "a", Providers: []any{Repo{}}}
 	cyc := &Module{Name: "c"}
 	cyc.Imports = []Declarer{&Module{Name: "d", Imports: []Declarer{cyc}}}
 
 	for want, m := range map[string]*Module{
-		"no provider for *di.Consumer": {Name: "x", Providers: []any{new(struct {
+		"no provider for *di.Consumer": {Name: "x", Providers: []any{struct {
 			C *Consumer `inject:""`
-		})}},
-		"no provider for *di.Service": {Name: "b", Imports: []Declarer{notExported}, Providers: []any{new(Consumer)}},
-		"pointer to struct":           {Name: "y", Providers: []any{DB{}}},
-		"duplicate provider":          {Name: "z", Providers: []any{new(DB), new(DB)}},
-		"must be exported to be injected": {Name: "u", Providers: []any{new(struct {
+		}{}}},
+		"no provider for *di.Service":                 {Name: "b", Imports: []Declarer{notExported}, Providers: []any{Consumer{}}},
+		"*di.DB must be declared as a value, di.DB{}": {Name: "p", Providers: []any{new(DB)}},
+		"*di.DB must be declared as a value":          {Name: "e", Providers: []any{Export(&DB{})}},
+		"provider string must be a struct value":      {Name: "y", Providers: []any{"db"}},
+		"provider <nil> must be a struct value":       {Name: "n", Providers: []any{nil}},
+		"duplicate provider":                          {Name: "z", Providers: []any{DB{}, DB{}}},
+		"must be exported to be injected": {Name: "u", Providers: []any{struct {
 			x *DB `inject:""`
-		})}},
-		"2 providers implement di.Greeter": {Name: "g", Providers: []any{new(Repo), new(struct{ *Repo }), new(struct {
+		}{}}},
+		"2 providers for di.Greeter": {Name: "g", Providers: []any{Repo{}, struct{ *Repo }{}, struct {
 			G Greeter `inject:""`
-		})}},
+		}{}}},
 		"import cycle": cyc,
 	} {
 		err := New(&DB{}).Load(m)

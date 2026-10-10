@@ -38,9 +38,23 @@ func (s *Service) Update(ctx context.Context, id string, req dtos.UpdateRequest)
 	return s.Repo.Update(ctx, id, req)
 }
 
-func (s *Service) TouchLastLogin(ctx context.Context, id string, at time.Time) error {
-	_, err := s.Repo.Update(ctx, id, database.Args{"lastlogin": at})
+// StartSession records the login and makes tokenID the only valid token.
+func (s *Service) StartSession(ctx context.Context, id, tokenID string, at time.Time) error {
+	_, err := s.Repo.Update(ctx, id, database.Args{"lastlogin": at, "token": tokenID})
 	return err
+}
+
+func (s *Service) EndSession(ctx context.Context, id string) error {
+	_, err := s.Repo.Update(ctx, id, database.Args{"token": nil})
+	return err
+}
+
+func (s *Service) ActiveToken(ctx context.Context, id string) (string, error) {
+	u, err := s.Repo.GetByID(ctx, id)
+	if err != nil || u.Token == nil {
+		return "", err
+	}
+	return *u.Token, nil
 }
 
 func (s *Service) Delete(ctx context.Context, id string) error {

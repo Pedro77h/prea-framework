@@ -1,6 +1,9 @@
 package security
 
 import (
+	"fmt"
+	"testing"
+
 	"github.com/golang-jwt/jwt/v5"
 	"prea/common"
 )
@@ -8,12 +11,24 @@ import (
 const (
 	DefaultAlg string = "HS256"
 	JwtEnv     string = "JWTKEY"
+	MinKeySize        = 32
 )
 
 var SignKey []byte
 
 func init() {
 	SignKey = []byte(common.GetEnv(JwtEnv))
+	// Fail at startup; tests set SignKey themselves.
+	if _, err := signKey(); err != nil && !testing.Testing() {
+		panic(err)
+	}
+}
+
+func signKey() ([]byte, error) {
+	if len(SignKey) < MinKeySize {
+		return nil, fmt.Errorf("security: %s must be set with at least %d bytes (got %d)", JwtEnv, MinKeySize, len(SignKey))
+	}
+	return SignKey, nil
 }
 
 type Jwt[M any] struct{}
@@ -31,7 +46,11 @@ func (Jwt[M]) CreateToken(object M, claims jwt.RegisteredClaims) (string, error)
 		claims,
 	}
 
-	encoded, err := token.SignedString(SignKey)
+	key, err := signKey()
+	if err != nil {
+		return "", err
+	}
+	encoded, err := token.SignedString(key)
 	if err != nil {
 		return "", err
 	}
@@ -41,10 +60,10 @@ func (Jwt[M]) CreateToken(object M, claims jwt.RegisteredClaims) (string, error)
 
 func (Jwt[M]) DecodeToken(token string) (DataClaims[M], error) {
 	keyFunc := func(token *jwt.Token) (interface{}, error) {
-		return SignKey, nil
+		return signKey()
 	}
 
-	parsed, err := jwt.ParseWithClaims(token, &DataClaims[M]{}, keyFunc)
+	parsed, err := jwt.ParseWithClaims(token, &DataClaims[M]{}, keyFunc, jwt.WithValidMethods([]string{DefaultAlg}))
 	if err != nil {
 		return DataClaims[M]{}, err
 	}

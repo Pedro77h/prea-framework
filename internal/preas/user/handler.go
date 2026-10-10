@@ -12,7 +12,8 @@ import (
 )
 
 type Handler struct {
-	Service *Service `inject:""`
+	Service *Service         `inject:""`
+	Auth    *middleware.Auth `inject:""`
 }
 
 var _ core.Router = (*Handler)(nil)
@@ -20,10 +21,10 @@ var _ core.Router = (*Handler)(nil)
 func (h *Handler) Register(r gin.IRouter) {
 	g := r.Group("/users")
 	g.POST("", h.create)
-	g.GET("", middleware.Auth, h.list)
-	g.GET("/:id", middleware.Auth, h.get)
-	g.PATCH("/:id", middleware.Auth, h.update)
-	g.DELETE("/:id", middleware.Auth, h.delete)
+	g.GET("", h.Auth.Handle, h.list)
+	g.GET("/:id", h.Auth.Handle, h.get)
+	g.PATCH("/:id", h.Auth.Handle, middleware.Owner, h.update)
+	g.DELETE("/:id", h.Auth.Handle, middleware.Owner, h.delete)
 }
 
 func (h *Handler) list(c *gin.Context) {
@@ -32,7 +33,7 @@ func (h *Handler) list(c *gin.Context) {
 		core.Error(c, err)
 		return
 	}
-	core.Response(c, http.StatusOK, users)
+	core.Reply(c, http.StatusOK, core.Data(users))
 }
 
 func (h *Handler) get(c *gin.Context) {
@@ -41,7 +42,7 @@ func (h *Handler) get(c *gin.Context) {
 		core.Error(c, err)
 		return
 	}
-	core.Response(c, http.StatusOK, u)
+	core.Reply(c, http.StatusOK, core.Data(u))
 }
 
 func (h *Handler) create(c *gin.Context) {
@@ -56,7 +57,7 @@ func (h *Handler) create(c *gin.Context) {
 		core.Error(c, err)
 		return
 	}
-	core.Response(c, http.StatusCreated, u)
+	core.Reply(c, http.StatusCreated, core.Data(u))
 }
 
 func (h *Handler) update(c *gin.Context) {
@@ -71,7 +72,7 @@ func (h *Handler) update(c *gin.Context) {
 		core.Error(c, err)
 		return
 	}
-	core.Response(c, http.StatusOK, u)
+	core.Reply(c, http.StatusOK, core.Data(u))
 }
 
 func (h *Handler) delete(c *gin.Context) {

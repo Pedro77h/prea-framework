@@ -3,13 +3,15 @@ package user
 import (
 	"prea/core"
 	"prea/di"
+	"prea/internal/middleware"
 )
 
 var Module = &core.Module{
 	Name: "user",
 	Providers: []any{
-		new(Repository),
-		di.Export(new(Service)),
-		new(Handler),
+		Repository{},
+		di.Export(Service{}),
+		middleware.Auth{},
+		Handler{},
 	},
 }
