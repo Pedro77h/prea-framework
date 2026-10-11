@@ -55,11 +55,15 @@ Severidade dos gaps: **Crítica** = quebra o isolamento ou a correção do frame
 
 | Sev. | Gap | Onde |
 |---|---|---|
-| Baixa | Não existe provider "valor pronto" por módulo: uma instância já criada fora do container, como um client configurado no `main`, só entra em `Globals`, que é visível para todos os módulos. Na maioria dos casos o `Init` resolve: o próprio componente cria o client. | `di` |
-| Baixa | Um middleware só recebe injeção como componente (struct nos `Providers` e injetada no handler), então não dá para usá-lo em `Module.Middlewares`, que monta antes do container. | `core/module.go` |
-| Baixa | A tag `inject` sem valor funciona, mas o `go vet` reclama dela; só `inject:""` passa limpo. | `di/inject.go` |
+| — | Nenhum gap aberto. | |
 
 **Resolvidos:**
+- **Middleware como componente:**
+  - `Module.Middlewares` aceita funções e componentes (`middleware.Auth{}`); o componente é criado, injetado e passa por `Init`/`Close` como qualquer outro, e é a mesma instância se também estiver em `Providers`;
+  - `preas.Middlewares` e `Security.Middlewares` também aceitam componentes: eles vivem num módulo implícito `app` que importa todos os módulos, então injetam os `Globals` e os exports de qualquer módulo;
+  - erros (ponteiro, struct sem `Handle`, dependência faltando) aparecem na subida;
+  - o `prea g m` gera componente por padrão, e função com `--func`.
+- **A tag curta `inject` foi removida.** Ela não era uma tag Go válida (o `go vet` acusava) e agora dá erro na subida com a correção; só `inject:""` é aceita.
 - **Ciclo de vida:**
   - hooks opcionais `Init(ctx) error` e `Close(ctx) error`/`io.Closer`;
   - o `Init` roda na ordem das dependências, inclusive entre módulos, e o `Close` na ordem inversa, no desligamento gracioso e antes do pool do banco fechar;
@@ -78,29 +82,48 @@ Severidade dos gaps: **Crítica** = quebra o isolamento ou a correção do frame
   - `di.TestIsolation`: 8 containers em paralelo com `-race`, cada um com o seu banco, nenhum componente compartilhado e a declaração intacta;
   - `core.TestAppsAreIsolated`: dois `App` montados a partir do mesmo módulo. Esse teste falha no código antigo (`app with "test" answered "prod"`).
 
-**Plano futuro:** escopo por request no container, um componente novo por requisição como no `@RequestScope` do Spring. Por enquanto o framework só tem singletons por container, e o estado de requisição vai no `context.Context`/`gin.Context`, como as claims do `Auth`.
+**Plano futuro:** memória por requisição, como o `SecurityContextHolder.getContext()` e o `@RequestScope` do Spring, que guardam o dado num `ThreadLocal` acessível de qualquer lugar. Por enquanto o framework só tem singletons por container, e o estado de requisição vai explicitamente no `context.Context`/`gin.Context`, como as claims do `Auth`. Em Go não existe `ThreadLocal`; o motivo está detalhado em [docs/injecao-de-dependencia.md](docs/injecao-de-dependencia.md#9-estado-por-requisição-não-há-securitycontextholder).
 
 ### Banco (`database`)
 
 | Sev. | Gap | Onde |
 |---|---|---|
-| Média | Só Postgres, e os tipos do pgx aparecem na API pública (`Conn`, `BaseRepository.DB *pgxpool.Pool`). | `database` |
-| Média | `GetAll` não tem paginação nem limite, então a resposta cresce sem teto. | `database/repository.go` |
-| Média | Os métodos do `BaseRepository` não rodam dentro de transação (`DB` está preso ao pool) e não há helper de transação. | `database/repository.go` |
-| Média | Migrations: só existe um `.sql` solto, sem runner e sem versionamento. | `internal/preas/user/migrations` |
-| Baixa | A chave primária é sempre `id`; tabela e rota usam o nome do pacote no singular. | `database`, templates |
-| Baixa | O mapeamento é *lax*: um campo sem coluna correspondente fica zerado sem erro, então um typo passa despercebido. | `database/statement.go` |
-| Baixa | `Update` com struct ignora campos zerados; para gravar zero é preciso usar `Args`, o que é fácil de esquecer. | `database/repository.go` |
-| Baixa | Não há `Count` nem `Exists`, e todas as queries usam `select *`. | `database/repository.go` |
+| Média | Só Postgres, e os tipos do pgx aparecem na API pública (`Conn`, `BaseRepository.DB *pgxpool.Pool`). **Decisão:** resolvido pelo multi-banco (passo 4) com os profiles (passo 1). | `database` |
+| Média | `GetAll` não tem paginação nem limite, então a resposta cresce sem teto. **Decisão:** resolvido pelo specification util com paginação (passo 9). | `database/repository.go` |
+| Média | Migrations: só existe um `.sql` solto, sem runner e sem versionamento. **Decisão:** resolvido pelas migrations do usuário (passo 2). | `internal/preas/user/migrations` |
+| Baixa | A chave primária é sempre `id`; tabela e rota usam o nome do pacote no singular. **Decisão:** a tag `pk` do passo 3 escolhe a chave. | `database`, templates |
+| Baixa | O mapeamento é *lax*: um campo sem coluna correspondente fica zerado sem erro, então um typo passa despercebido. **Decisão:** as tags do passo 3 dizem qual campo corresponde a qual coluna, e o mapeamento pode ser validado contra elas. | `database/statement.go` |
+
+**Resolvidos:**
+- **Update que perdia zeros (Baixa → Alta):** um `Update` com struct ignorava campos zerados, então `Active = false` ou `Count = 0` sumiam sem erro, uma perda de dados silenciosa. Agora:
+  - `Save(ctx, entidade)`, no estilo do `save` do JPA: grava todas as colunas, zeros inclusive; insere com PK zerada, senão atualiza (`ErrNotFound` se a linha não existe). O fluxo é carregar, alterar e salvar, dentro de uma `Transaction` quando precisa ser atômico;
+  - o `Update` continua sendo *patch*, mas o DTO pode usar ponteiros: `nil` não mexe, e um ponteiro para zero grava o zero (testado). O template do `UpdateRequest` explica isso;
+  - ficou para depois: lock otimista (o `@Version` do JPA), que depende de uma coluna de versão declarada pelas tags do passo 3.
+- **`Count` e `Exists`:** com filtro `Args` (`nil` = tabela toda), usando o mesmo `where` do `Where`/`First`.
+- **Seleção de campos:** os métodos prontos usam `select *`; para escolher as colunas, use o `Prepare`, que mapeia para o model ou para um DTO de projeção (`Prepare[Summary](r.DB, "select id, name ...")`).
+- **Transação (`@Transactional`):** `database.Transactional` embutido no componente marca quais métodos são atômicos com `s.Transaction(ctx, func(ctx) error {...})`.
+  - A transação viaja no `ctx`: todo `Statement` do mesmo pool que roda com esse `ctx` usa a transação, inclusive o `BaseRepository` e as queries de `r.Prepare`, sem mudar os repositórios.
+  - Commit quando a função devolve `nil`; rollback em erro ou panic (o panic continua subindo).
+  - Chamada dentro de outra transação, abre um savepoint: o erro desfaz só o trabalho interno e a externa decide se segue.
+  - A chave da transação no `ctx` é o pool, então com mais de um banco uma transação não captura queries de outro.
+  - Exemplo em `internal/preas/auth`: o `Login` grava a sessão (que revoga a anterior) e assina o token na mesma transação; se a assinatura falha, a sessão anterior continua valendo. Isso corrigia um bug real do exemplo.
+  - Ficou para depois: nível de isolamento e transação só de leitura (`TransactionWith(ctx, opts, fn)`), quando houver necessidade.
 
 ### CLI
 
 | Sev. | Gap | Onde |
 |---|---|---|
-| Baixa | Nomes aceitam só letras (`order_item` e números são recusados); o arquivo do middleware sai todo em minúsculo. | `cmd/prea/generate.go` |
-| Baixa | O caminho do framework está fixo (`frameworkModule = "prea"`). | `cmd/prea/generate.go` |
-| Baixa | Faltam `prea new` (scaffold de projeto), `prea migrate` e hot reload; o `prea run` depende de `./cmd/server`. | `cmd/prea` |
-| Baixa | O gerador não tem testes, inclusive o `register.go`, que mexe na AST do `preas.go`. | `cmd/prea` |
+| Baixa | Faltam `prea new` (scaffold de projeto), `prea migrate` e `prea dev` (hot reload); o `prea run` depende de `./cmd/server`. **Decisão:** vêm depois da separação em módulos (passo 5), junto do `prea.go` (passo 6). | `cmd/prea` |
+
+**Resolvidos:**
+- **Nomes:** letras em camel case ou separadas por `_` (`order_item`, `OrderItem`); números continuam recusados (`order123`). Cada parte recebe a forma da convenção: pacote `orderitem`, tipo `OrderItem`, tabela `order_item`, rota `/order-item` e arquivo de middleware `rate_limit.go`.
+- **Validação antes de gerar:** palavra-chave do Go, pacote com o nome de um import do `preas.go`, preá ou middleware existente e identificador já declarado no pacote de middlewares. O `preas.go` novo é calculado e validado **antes** de criar qualquer arquivo; um comando que falha não altera o projeto.
+- **Testes pesados do gerador** (`cmd/prea`), em três camadas:
+  - unidade: nomes e a edição do `preas.go` em vários formatos;
+  - comportamento: arquivos, conteúdo e registro, e o projeto intacto em todo erro;
+  - projeto gerado: um projeto novo, ligado ao framework por `replace`, passa por `go vet` e `go test -race`; o teste de dentro confere as rotas e, com banco, faz o CRUD pelo HTTP. Mutações nos templates (tirar o `TrimSpace`, trocar a rota) são pegas.
+
+**Decisão (não é gap):** o caminho fixo `frameworkModule = "prea"` está certo: com a separação em módulos, tudo será importado de `prea/<pacote>`.
 
 ### Estrutura e qualidade
 
@@ -157,7 +180,10 @@ type User struct {
 }
 ```
 - `prea g migration --from-models` compara os models com o schema atual (introspecção) e gera o `up`/`down` em `migrations/`, para revisar antes de aplicar.
-- De quebra resolve a PK fixa: `pk` define a chave primária.
+- Resolve gaps do banco:
+  - **PK fixa:** `pk` define a chave primária, e o `BaseRepository` passa a usá-la em vez de `id`;
+  - **mapeamento lax:** com as colunas declaradas, o mapeamento pode ser estrito (um campo sem coluna vira erro na subida, não um zero silencioso);
+  - **lock otimista:** uma tag `version` faz o `Save` checar e incrementar a versão, como o `@Version` do JPA.
 - Outras tags possíveis: `value:"chave"` (config) e `profile:"dev"`. O `inject:"nome"` já existe.
 
 **Decisões em aberto:** estender a tag `db` ou criar uma tag `column` separada; como representar rename de coluna, que um diff não consegue detectar.
@@ -169,10 +195,10 @@ type User struct {
 **Proposta:**
 - O `database` passa a definir só interfaces. Cada driver vira um módulo separado, para que o projeto baixe apenas o driver que usa: `database/postgres` (pgx), `database/mysql`, `database/sqlite` e `database/mongo`.
 - No SQL, um `Dialect` cuida das diferenças: placeholders (`$1` ou `?`), quoting (`"` ou `` ` ``) e `RETURNING` (o MySQL não tem). Os parâmetros `@nome` do `Prepare` são traduzidos para o dialeto.
-- No NoSQL, a parte comum é a interface do `BaseRepository` (`GetAll`, `GetByID`, `Where`, `First`, `Create`, `Update`, `Delete` com filtro `Args`, que vira `bson.M` no Mongo). O `Prepare` (estilo PDO) continua só no SQL; o Mongo expõe a collection nativa para consultas próprias.
+- No NoSQL, a parte comum é a interface do `BaseRepository` (`GetAll`, `GetByID`, `Where`, `First`, `Create`, `Update`, `Save`, `Count`, `Exists`, `Delete` com filtro `Args`, que vira `bson.M` no Mongo; o `Save` vira `replaceOne` e o `Count`, `countDocuments`). O `Prepare` (estilo PDO) continua só no SQL; o Mongo expõe a collection nativa para consultas próprias.
 - Conexões nomeadas na config (`database.main`, `database.analytics`) e injetadas pelo nome (`di.Named` + `inject:"analytics"`, que já existem).
 - Cada driver traduz os próprios erros para os erros do framework (`ErrConflict`, `ErrNotFound`...).
-- Os métodos do repositório passam a aceitar transação (`repo.WithTx(tx)` ou o contexto carregando a tx).
+- Cada driver implementa o `database.Transactional` (transação no `ctx`), que já existe para o Postgres.
 
 **Decisões em aberto:** até onde o Mongo entra no `BaseRepository`; usar `database/sql` como base dos drivers SQL que não são Postgres.
 
@@ -185,17 +211,19 @@ type User struct {
 
   | Módulo | Depende de |
   |---|---|
-  | `github.com/<org>/prea/di` | nada |
-  | `github.com/<org>/prea/errs` (o atual `common`, renomeado e sem código morto) | nada |
-  | `github.com/<org>/prea/core` | `di`, `errs`, gin |
-  | `github.com/<org>/prea/database` + um submódulo por driver | `errs` |
-  | `github.com/<org>/prea/security` | `errs` |
-  | `github.com/<org>/prea/cli` (o atual `cmd/prea`) | nada do framework |
+  | `prea/di` | nada |
+  | `prea/errs` (o atual `common`, renomeado e sem código morto) | nada |
+  | `prea/core` | `di`, `errs`, gin |
+  | `prea/database` + um submódulo por driver | `errs` |
+  | `prea/security` | `errs` |
+  | `prea/cli` (o atual `cmd/prea`) | nada do framework |
 
 - A app de exemplo (`internal/preas`) sai do repositório do framework e vira o template do `prea new`.
-- A constante `frameworkModule` da CLI passa a apontar para o caminho real do módulo.
+- A CLI ganha `prea new` (o template de projeto), `prea migrate` (passo 2) e `prea dev` (hot reload).
 
-**Decisões em aberto:** org e caminho do módulo no GitHub; política de versão (todos os módulos com a mesma versão ou cada um com a sua).
+**Decisões em aberto:**
+- **Caminho baixável.** O `go get` só baixa módulos cujo caminho começa com um domínio (`github.com/...`, `prea.dev/...`). Um caminho `prea/core` funciona com `replace`/`go.work`, mas não pelo proxy. Opções: um domínio de *vanity import* (`prea.dev/core`, com a `frameworkModule` da CLI apontando para ele), ou `github.com/<org>/prea/core`.
+- Política de versão: todos os módulos com a mesma versão ou cada um com a sua.
 
 ### 6. `prea.go` como único ponto de contato com o framework
 
@@ -204,7 +232,7 @@ type User struct {
 **Proposta:** a estrutura de um projeto:
 ```
 meu-app/
-├── go.mod          # require github.com/<org>/prea/core ...
+├── go.mod          # require prea/core ...
 ├── prea.go         # único arquivo que conversa com o framework
 ├── config/         # application.yaml + profiles
 ├── migrations/
@@ -219,7 +247,7 @@ package main
 func main() {
 	prea.Run(prea.Config{
 		Modules:     []*core.Module{user.Module, auth.Module},
-		Middlewares: []core.Middleware{core.RequestLogger, core.Recovery},
+		Middlewares: []any{core.RequestLogger, core.Recovery},
 	})
 }
 ```
@@ -235,7 +263,7 @@ func main() {
 **Proposta, por prioridade:**
 1. ~~Segredo obrigatório e validado na subida; `jwt.WithValidMethods`.~~ Feito.
 2. **Autorização**: `middleware.Require("admin")` com papéis e permissões vindos das claims (o `ErrForbidden` já existe).
-3. **Tokens**: issuer/audience e TTL configuráveis; refresh token com rotação; revogação por `jti` (blacklist ou versão do token no usuário).
+3. **Tokens**: issuer/audience e TTL configuráveis; refresh token com rotação. A revogação por `jti` já existe no exemplo (`users.token`); falta levá-la para o framework.
 4. **Chaves**: suporte a RS256/EdDSA e rotação por `kid`.
 5. **Senhas**: parâmetros do argon2 configuráveis; *rehash* no login quando os parâmetros mudam; política mínima de senha; hash fictício para usuário inexistente, deixando o tempo de resposta igual.
 6. **Proteções HTTP**: CORS, CSRF e headers já existem em `core.Security`; falta um middleware de rate limit.
@@ -264,9 +292,34 @@ func main() {
 
 **Depende de:** nada; a parte de configs combina com o passo 1.
 
+### 9. Specification e paginação
+
+**Objetivo:** filtros dinâmicos e paginados sem SQL na mão, no modelo do `SpecificationUtils` usado nos projetos Spring.
+
+**Proposta:**
+- Cada filtro "IfPresent" só restringe quando o valor existe (ponteiro não nil, slice não vazio, texto não em branco), então um DTO de filtro vira a consulta direto:
+```go
+spec := database.AllOf(
+	database.EqualIfPresent("status", f.Status),
+	database.GreaterOrEqualIfPresent("price", f.MinPrice),
+	database.LessOrEqualIfPresent("price", f.MaxPrice),
+	database.InIfPresent("city", f.Cities),
+	database.LikeAnyIfPresent(f.Search, "title", "code", "address"),
+)
+page, err := r.Search(ctx, spec, database.PageRequest{Page: 0, Size: 20, Sort: "price desc"})
+// page.Items, page.Total, page.Page, page.Size
+```
+- A spec gera SQL com parâmetros `@pN` e colunas com quoting, como o `Where` atual; `Sort` só aceita colunas do model, para não abrir injeção.
+- `GetAll` ganha um limite padrão ou passa a ser paginado.
+- `Count` e `Exists` (que já existem com `Args`) passam a aceitar uma spec; o `Search` usa o `Count` para preencher `page.Total`.
+
+**Decisões em aberto:** caminhos com join (`agency.id` no Spring); como o Mongo traduz a spec (passo 4).
+
+**Depende de:** nada; os dialetos do passo 4 passam a gerar o SQL da spec.
+
 ### Ordem sugerida
 
-0. ~~Gaps de segurança~~ (feito).
+0. ~~Gaps de segurança, servidor e DI; no banco, transação, `Save`, `Count`/`Exists` e seleção de campos~~ (feito).
 1. **Config e profiles**: base para segredos, banco, migrations e `prea.go`.
 2. **Migrations**: logo se torna necessário, e o runner também é usado pelo passo 3.
 3. **Separação em módulos e `prea.go`**: estabiliza a fronteira entre framework e usuário antes de crescer a API.
@@ -274,5 +327,11 @@ func main() {
 5. **Tags de schema e geração de migrations**: depende de migrations e dos dialetos.
 6. **Segurança**: o restante do passo 7.
 7. **Validação de structs** (passo 8): independente; pode entrar antes, se o formato de erro for prioridade.
+8. **Specification e paginação** (passo 9): independente; resolve o `GetAll` sem limite.
 
-Os gaps de severidade Média de servidor e DI (graceful shutdown, timeouts, `Ping`, singletons) entram junto do `prea.Run` no passo 3.
+Todos os gaps Média e de banco que restam já têm passo definido:
+- configuração → passo 1;
+- só Postgres → passos 1 e 4;
+- migrations → passo 2;
+- PK fixa, mapeamento lax e lock otimista → passo 3;
+- `GetAll` sem limite → passo 9.

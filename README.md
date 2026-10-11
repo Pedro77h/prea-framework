@@ -124,6 +124,8 @@ Os módulos são ligados à aplicação em `internal/preas/preas.go`. O `prea g 
 
 ### Injeção de dependência
 
+> O guia completo, com a comparação com os beans do Spring, o ciclo de vida, a resolução, os erros e a migração, está em [docs/injecao-de-dependencia.md](docs/injecao-de-dependencia.md).
+
 Campos com a tag `inject:""` são preenchidos na subida:
 
 ```go
@@ -147,7 +149,7 @@ type Service struct {
 - **Concorrência:** um mesmo componente atende todas as requisições ao mesmo tempo, cada uma em sua goroutine. Não guarde estado de requisição em campos da struct; use variáveis locais ou o `gin.Context`. Estado compartilhado mutável precisa de `sync.Mutex` ou `atomic`.
 - **Erros aparecem na subida**, com o caminho do campo, por exemplo `di: module auth: Service.Users: no provider for *user.Service`. Isso vale para dependência faltando, provider duplicado, interface ambígua e ciclo de imports.
 
-A tag `inject` sem valor também funciona, mas o `go vet` reclama dela. Prefira `inject:""`.
+Use sempre `inject:""`. A forma curta `inject` sem valor não é uma tag válida em Go (o `go vet` acusa) e dá erro na subida.
 
 **Componentes nomeados.** O nome é opcional, como um token do Angular. Ele serve para quando há mais de um componente do mesmo tipo:
 
@@ -240,8 +242,27 @@ O `database.BaseRepository[T]` traz o CRUD pronto:
 | `Where(ctx, database.Args{"owner_id": 1})` | as linhas que batem com o filtro (`nil` vira `IS NULL`) |
 | `First(ctx, args)` | a primeira linha que bate com o filtro |
 | `Create(ctx, dto)` | insere **todos** os campos do DTO e devolve a linha criada |
-| `Update(ctx, id, dto)` | atualiza só os campos **não zerados**; para gravar um zero, use `database.Args` |
+| `Update(ctx, id, dto)` | *patch*: atualiza só os campos **não zerados**; para gravar um zero, use ponteiro no DTO (`nil` = não mexe) ou `database.Args` |
+| `Save(ctx, entidade)` | como o `save` do JPA: grava **todas** as colunas, zeros inclusive. Insere se a PK está zerada, senão atualiza (`ErrNotFound` se não existe) |
+| `Count(ctx, args)` | quantas linhas batem com o filtro (`nil` conta todas) |
+| `Exists(ctx, args)` | se alguma linha bate com o filtro |
 | `Delete(ctx, id)` | apaga a linha, ou devolve `ErrNotFound` |
+
+**Atualizar no estilo JPA:** carregue, altere e salve. Use uma transação quando a leitura e a escrita precisam ser atômicas:
+
+```go
+err := s.Transaction(ctx, func(ctx context.Context) error {
+	u, err := s.Repo.GetByID(ctx, id)
+	if err != nil {
+		return err
+	}
+	u.Active = false // um zero que o Update ignoraria
+	_, err = s.Repo.Save(ctx, u)
+	return err
+})
+```
+
+No insert, o `Save` grava todos os campos, então só a PK recebe o default do banco. Para usar os defaults das outras colunas, use o `Create` com um DTO.
 
 **Queries próprias, no estilo PDO**, com parâmetros nomeados `@nome`:
 
@@ -258,8 +279,38 @@ func (r *Repository) FindByUsername(ctx context.Context, username string) (User,
 ```
 
 - `All(ctx)`, `One(ctx)` e `Exec(ctx)` correspondem a fetchAll, fetch e rowCount.
-- `database.Prepare[T](conn, sql)` mapeia o resultado para qualquer tipo: um DTO com parte das colunas, ou um valor simples como `Prepare[int64](pool, "select count(*) from users")`.
-- `conn` pode ser o pool ou uma transação (`pgx.Tx`).
+- **Escolher os campos:** os métodos prontos usam `select *`; para trazer só algumas colunas, escreva-as no `Prepare`. `database.Prepare[T](conn, sql)` mapeia o resultado para qualquer tipo: um DTO com parte das colunas (`Prepare[Summary](r.DB, "select id, name from users")`), ou um valor simples como `Prepare[int64](r.DB, "select max(profile) from users")`.
+- `conn` pode ser o pool ou uma transação (`pgx.Tx`). Com o pool, a transação do `ctx` (veja abaixo) tem prioridade.
+
+**Transações, no estilo `@Transactional`:** embuta `database.Transactional` no componente e envolva os métodos que precisam ser atômicos:
+
+```go
+type Service struct {
+	database.Transactional // injeta o pool, como um inject:""
+	Users  *Repository `inject:""`
+	Audits *audit.Service `inject:""`
+}
+
+func (s *Service) Register(ctx context.Context, req dtos.CreateRequest) (User, error) {
+	var u User
+	err := s.Transaction(ctx, func(ctx context.Context) error {
+		var err error
+		if u, err = s.Users.Create(ctx, req); err != nil {
+			return err
+		}
+		return s.Audits.Log(ctx, "user created", u.ID)
+	})
+	return u, err
+}
+```
+
+- **A transação viaja no `ctx`.** Tudo que roda com o `ctx` recebido pela função usa a transação: o `BaseRepository`, o `r.Prepare` e os services de outros preás. Os repositórios não mudam.
+- **Commit** quando a função devolve `nil`. **Rollback** em erro ou panic, e o panic continua subindo.
+- **Aninhada**, uma transação dentro de outra abre um savepoint: o erro desfaz só o trabalho interno, e a externa decide se segue ou devolve o erro.
+- **Cuidados:**
+  - use o `ctx` da função, não o de fora, senão a query roda fora da transação;
+  - uma transação é uma conexão, então não use o `ctx` dela em várias goroutines ao mesmo tempo;
+  - acesso direto ao pool (`r.DB.Query`) fica fora da transação: use `r.Prepare`.
 
 **Nomes das colunas:** o campo vira snake_case (`OwnerID` → `owner_id`). A tag `db:"nome"` sobrescreve e `db:"-"` ignora o campo. Nomes de tabelas e colunas são sempre escapados.
 
@@ -273,35 +324,46 @@ func (r *Repository) FindByUsername(ctx context.Context, username string) (User,
 
 ### Middlewares
 
-Middleware é um `core.Middleware`, que é o mesmo que `gin.HandlerFunc`, e pode ser usado em três níveis:
+Existem dois tipos de middleware:
+
+- **Componente** (padrão do `prea g m <Nome>`): uma struct com campos `inject` e um método `Handle(c *gin.Context)`. O container gerencia como qualquer componente: cria, injeta e chama `Init`/`Close`. Use quando o middleware precisa de um service, do banco ou de config.
+- **Função** (`prea g m <Nome> --func`): um `core.Middleware`, que é o mesmo que `gin.HandlerFunc`, sem injeção.
 
 ```go
-// global: internal/preas/preas.go
-var Middlewares = []core.Middleware{core.RequestLogger, core.Recovery}
-
-// por módulo: vale para todas as rotas do módulo
-var Module = &core.Module{Name: "admin", Middlewares: []core.Middleware{gin.BasicAuth(contas)}, ...}
-
-// por rota
-g.GET("", middleware.Owner, h.list)
-```
-
-**Middleware com dependências.** Se o middleware precisa de um service ou do banco, transforme-o em componente: uma struct com campos `inject` e um método `func(c *gin.Context)`. Declare a struct nos `Providers` do módulo e injete-a no handler. O `middleware.Auth` do exemplo funciona assim:
-
-```go
+// componente: internal/middleware/auth.go
 type Auth struct {
 	Sessions Sessions `inject:""` // interface; user.Service a implementa
 }
 
 func (a *Auth) Handle(c *gin.Context) { ... }
-
-// module.go:  Providers: []any{..., middleware.Auth{}, Handler{}}
-// handler.go: g.GET("", h.Auth.Handle, h.list)
 ```
+
+Onde cada um pode ser usado:
+
+| Nível | Função | Componente |
+|---|---|---|
+| **global** (`preas.Middlewares` e `Security.Middlewares`) | `core.RequestLogger` | `middleware.RateLimit{}` |
+| **módulo** (`Module.Middlewares`, vale para todas as rotas do módulo) | `gin.BasicAuth(contas)` | `middleware.Auth{}` |
+| **rota** | `g.GET("", middleware.Owner, h.list)` | injetado no handler: `g.GET("", h.Auth.Handle, h.list)` |
+
+```go
+var Module = &core.Module{
+	Name:        "admin",
+	Providers:   []any{Handler{}},
+	Middlewares: []any{core.Middleware(audit), middleware.Auth{}}, // funções e componentes, na ordem
+}
+```
+
+- **Por módulo**, o componente é criado automaticamente: não precisa repetir em `Providers`.
+- **Global**, o componente fica num módulo implícito `app` que importa todos os módulos: injeta os `Globals` e os exports (`di.Export`) de qualquer módulo, e passa por `Init`/`Close`. Se aparece nas duas listas globais, é a mesma instância.
+- **Por rota**, declare `middleware.Auth{}` em `Providers` e injete no handler (``Auth *middleware.Auth `inject:""` ``).
+- **Nos dois ao mesmo tempo**, é a mesma instância.
+- **Erros na subida, não em produção:** declarar `&middleware.Auth{}` ou uma struct sem `Handle`.
+- **Cuidado com o atalho** `(&middleware.Auth{}).Handle`. Ele compila, mas cria um `Auth` fora do container e sem injeção, e dá panic na primeira requisição. Passe sempre o valor `middleware.Auth{}`.
 
 Para depender de outro preá sem ciclo de imports, use uma interface, como `Sessions` no exemplo.
 
-A ordem de execução é **segurança → global → módulo → rota → handler**. Chame `c.Next()` para continuar ou `c.Abort()` para parar a cadeia. Para criar um, use `prea g m <Nome>`.
+A ordem de execução é **segurança → global → módulo → rota → handler**. Chame `c.Next()` para continuar ou `c.Abort()` para parar a cadeia.
 
 ### Logs
 
@@ -417,7 +479,7 @@ var Security = core.Security{
 	CSRF: &core.CSRF{Deny: func(c *gin.Context) { c.AbortWithStatusJSON(403, gin.H{"erro": "origem"}) }},
 
 	// suas proteções: rodam depois de Headers, CORS e CSRF e antes dos middlewares globais
-	Middlewares: []core.Middleware{middleware.RateLimit, middleware.CSRFToken},
+	Middlewares: []any{middleware.RateLimit{}, middleware.CSRFToken}, // componentes e funções
 }
 ```
 
@@ -446,11 +508,27 @@ As senhas são guardadas com hash argon2id. Os tokens são HS256, e só esse alg
 |---|---|
 | `prea run [-p 8000]` | compila e sobe o `./cmd/server`, repassando os sinais para o desligamento gracioso; a porta também pode vir de `$PORT` |
 | `prea g p <Nome>` | cria `internal/preas/<nome>/` (module, handler, service, repository, model e dtos) e registra o módulo em `preas.go` |
-| `prea g m <Nome>` | cria `internal/middleware/<nome>.go` |
+| `prea g m <Nome> [--func]` | cria `internal/middleware/<nome>.go`: um componente (com injeção), ou uma função com `--func` |
 
 O `g` é atalho de `generate`, o `p` de `prea` e o `m` de `middleware`. Rode a CLI na raiz do projeto: ela lê o `go.mod` para descobrir o caminho dos imports.
 
-O módulo gerado tem as rotas `/<nome>` (GET, GET `/:id`, POST, PATCH `/:id`, DELETE `/:id`) e usa a tabela `<nome>`, que você precisa criar no banco.
+**Nomes:** letras, em camel case ou separadas por `_`. `OrderItem` e `order_item` são a mesma coisa; números não são aceitos (`order123`). Cada parte do código recebe a forma que a convenção pede:
+
+| `prea g p order_item` | |
+|---|---|
+| pacote e pasta | `orderitem` (pacote Go não usa `_`) |
+| tipos | `OrderItem` |
+| tabela | `order_item` (que você cria no banco) |
+| rotas | `/order-item` (GET, GET `/:id`, POST, PATCH `/:id`, DELETE `/:id`) |
+
+No middleware, o arquivo segue a tabela: `prea g m rate_limit` cria `internal/middleware/rate_limit.go` com o tipo `RateLimit`.
+
+**Antes de gerar, a CLI confere tudo; se algo falha, o projeto não é alterado:**
+- o nome não pode ser uma palavra-chave do Go (`type`);
+- o pacote não pode ter o nome de um import do `preas.go` (`core`, `time`);
+- o preá ou o arquivo do middleware não pode existir;
+- o middleware não pode ter o nome de algo já declarado no pacote (`Owner`);
+- o `preas.go` precisa ter o bloco de imports entre parênteses e o `var Modules = []*core.Module{...}`.
 
 ## Configuração
 
@@ -470,9 +548,17 @@ As variáveis podem vir do ambiente ou de um `.env` na raiz (veja o `.env.exampl
 ```bash
 go test ./...
 
-# inclui o teste de integração do banco (cria e apaga a tabela "widgets")
-PREA_TEST_DATABASE_URL="postgres://user:pass@localhost:5432/prea_test?sslmode=disable" go test ./database
+# sem os testes que compilam um projeto gerado
+go test -short ./...
+
+# inclui os testes de integração do banco (criam e apagam as tabelas "widgets" e "order_item")
+PREA_TEST_DATABASE_URL="postgres://user:pass@localhost:5432/prea_test?sslmode=disable" go test ./...
 ```
+
+O gerador é testado em três camadas (`cmd/prea`):
+- **unidade:** formas dos nomes, nomes inválidos e a edição do `preas.go` em vários formatos (lista vazia, numa linha, com comentários, em grupo `var (...)`, import com alias);
+- **comportamento:** gera num projeto temporário e confere arquivos, registro e conteúdo; todo comando que falha deixa o projeto intacto;
+- **projeto gerado:** gera preás e middlewares num projeto novo, que usa este framework via `replace`, e roda `go vet` e `go test -race` nele. O teste de dentro monta a app e confere as rotas; com o banco, faz o CRUD inteiro pelo HTTP.
 
 ## Licença
 
