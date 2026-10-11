@@ -53,3 +53,8 @@ func unwrap(p any) (value any, name string, export bool) {
 		}
 	}
 }
+
+func Unwrap(provider any) any {
+	value, _, _ := unwrap(provider)
+	return value
+}

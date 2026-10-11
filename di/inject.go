@@ -17,15 +17,18 @@ func injectFields(v reflect.Value, scopes [][]component, deps *[]any) error {
 			}
 			continue
 		}
-		if !wantsInjection(field) || !value.IsZero() {
+		name := v.Type().Name() + "." + field.Name
+		tag, tagged := field.Tag.Lookup("inject")
+		if !tagged && slices.Contains(strings.Fields(string(field.Tag)), "inject") {
+			return fmt.Errorf(`%s: use the tag inject:"" (a bare inject is not a valid Go struct tag)`, name)
+		}
+		if !tagged || !value.IsZero() {
 			continue
 		}
-
-		name := v.Type().Name() + "." + field.Name
 		if !value.CanSet() {
 			return fmt.Errorf("%s must be exported to be injected", name)
 		}
-		dep, err := resolve(field.Type, field.Tag.Get("inject"), scopes)
+		dep, err := resolve(field.Type, tag, scopes)
 		if err != nil {
 			return fmt.Errorf("%s: %w", name, err)
 		}
@@ -33,11 +36,6 @@ func injectFields(v reflect.Value, scopes [][]component, deps *[]any) error {
 		*deps = append(*deps, dep)
 	}
 	return nil
-}
-
-func wantsInjection(field reflect.StructField) bool {
-	_, tagged := field.Tag.Lookup("inject")
-	return tagged || slices.Contains(strings.Fields(string(field.Tag)), "inject")
 }
 
 func resolve(t reflect.Type, name string, scopes [][]component) (any, error) {

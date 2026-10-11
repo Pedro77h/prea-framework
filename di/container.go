@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"reflect"
+	"slices"
 )
 
 type component struct {
@@ -182,16 +183,16 @@ func (c *Container) Init(ctx context.Context) error {
 
 func (c *Container) Close(ctx context.Context) error {
 	var errs []error
-	for i := len(c.started) - 1; i >= 0; i-- {
+	for _, v := range slices.Backward(c.started) {
 		var err error
-		switch p := c.started[i].(type) {
+		switch p := v.(type) {
 		case Closer:
 			err = p.Close(ctx)
 		case io.Closer:
 			err = p.Close()
 		}
 		if err != nil {
-			errs = append(errs, fmt.Errorf("di: %T.Close: %w", c.started[i], err))
+			errs = append(errs, fmt.Errorf("di: %T.Close: %w", v, err))
 		}
 	}
 	c.started = nil

@@ -129,11 +129,10 @@ func TestErrors(t *testing.T) {
 }
 
 func TestBareTag(t *testing.T) {
-	for tag, want := range map[reflect.StructTag]bool{
-		`inject`: true, `json:"-" inject`: true, `inject:""`: true, `json:"inject"`: false, `injected`: false,
-	} {
-		if wantsInjection(reflect.StructField{Tag: tag}) != want {
-			t.Errorf("%s: want %v", tag, want)
-		}
+	// built at runtime: go vet rejects the bare tag in source code
+	bare := reflect.StructOf([]reflect.StructField{{Name: "DB", Type: reflect.TypeFor[*DB](), Tag: `json:"-" inject`}})
+	err := New(&DB{}).Load(&Module{Name: "b", Providers: []any{reflect.New(bare).Elem().Interface()}})
+	if err == nil || !strings.Contains(err.Error(), `.DB: use the tag inject:""`) {
+		t.Fatalf("a bare inject must fail with the fix: %v", err)
 	}
 }
