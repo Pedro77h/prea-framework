@@ -52,7 +52,7 @@ func (s *Statement[T]) BindArgs(args Args) *Statement[T] {
 // All returns every row. T is a struct (columns map to fields by `db` tag or
 // name, ignoring case and underscores) or a scalar for single-column queries.
 func (s *Statement[T]) All(ctx context.Context) ([]T, error) {
-	rows, err := s.conn.Query(ctx, s.sql, s.args)
+	rows, err := connFor(ctx, s.conn).Query(ctx, s.sql, s.args)
 	if err != nil {
 		return nil, translate(err)
 	}
@@ -62,7 +62,7 @@ func (s *Statement[T]) All(ctx context.Context) ([]T, error) {
 
 // One returns exactly one row, or common.ErrNotFound.
 func (s *Statement[T]) One(ctx context.Context) (T, error) {
-	rows, err := s.conn.Query(ctx, s.sql, s.args)
+	rows, err := connFor(ctx, s.conn).Query(ctx, s.sql, s.args)
 	if err != nil {
 		var zero T
 		return zero, translate(err)
@@ -73,7 +73,7 @@ func (s *Statement[T]) One(ctx context.Context) (T, error) {
 
 // Exec runs a statement that returns no rows and reports the affected rows.
 func (s *Statement[T]) Exec(ctx context.Context) (int64, error) {
-	tag, err := s.conn.Exec(ctx, s.sql, s.args)
+	tag, err := connFor(ctx, s.conn).Exec(ctx, s.sql, s.args)
 	return tag.RowsAffected(), translate(err)
 }
 

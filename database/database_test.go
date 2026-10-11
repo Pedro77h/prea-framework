@@ -5,10 +5,12 @@ import (
 	"errors"
 	"os"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
 	"prea/common"
+	"prea/di"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -171,5 +173,100 @@ func TestRepository(t *testing.T) {
 	must(repo.Delete(ctx, a.ID))
 	if err := repo.Delete(ctx, a.ID); !errors.Is(err, common.ErrNotFound) {
 		t.Fatalf("delete twice: %v", err)
+	}
+}
+
+// Runs against a real database: PREA_TEST_DATABASE_URL=postgres://... go test ./database
+func TestTransactional(t *testing.T) {
+	url := os.Getenv("PREA_TEST_DATABASE_URL")
+	if url == "" {
+		t.Skip("PREA_TEST_DATABASE_URL not set")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	if _, err := pool.Exec(ctx, `drop table if exists widgets; create table widgets (
+		id uuid primary key default gen_random_uuid(), name text not null unique,
+		owner_id int, last_seen timestamptz, active bool not null default true)`); err != nil {
+		t.Fatal(err)
+	}
+
+	repo := &BaseRepository[widget]{DB: pool}
+	svc := Transactional{DB: pool}
+	names := func(ctx context.Context) string {
+		ns, err := Prepare[string](pool, "select name from widgets order by name").All(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.Join(ns, ",")
+	}
+	fail := errors.New("fail")
+
+	err = svc.Transaction(ctx, func(ctx context.Context) error {
+		if _, err := repo.Create(ctx, widget{Name: "a"}); err != nil {
+			return err
+		}
+		if names(ctx) != "a" || names(context.Background()) != "" {
+			t.Error("the row must be visible only inside the transaction")
+		}
+		return nil
+	})
+	if err != nil || names(ctx) != "a" {
+		t.Fatalf("commit: %v %q", err, names(ctx))
+	}
+
+	err = svc.Transaction(ctx, func(ctx context.Context) error {
+		repo.Create(ctx, widget{Name: "b"})
+		return fail
+	})
+	if !errors.Is(err, fail) || names(ctx) != "a" {
+		t.Fatalf("an error rolls back: %v %q", err, names(ctx))
+	}
+
+	err = svc.Transaction(ctx, func(ctx context.Context) error {
+		repo.Create(ctx, widget{Name: "c"})
+		inner := svc.Transaction(ctx, func(ctx context.Context) error {
+			repo.Create(ctx, widget{Name: "d"})
+			_, err := repo.Create(ctx, widget{Name: "a"}) // duplicate
+			return err
+		})
+		if !errors.Is(inner, common.ErrConflict) {
+			t.Errorf("inner error must be translated: %v", inner)
+		}
+		return nil // the outer one decides to go on
+	})
+	if err != nil || names(ctx) != "a,c" {
+		t.Fatalf("nested: a savepoint rolls back only the inner work: %v %q", err, names(ctx))
+	}
+
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Error("the panic must propagate")
+			}
+		}()
+		svc.Transaction(ctx, func(ctx context.Context) error {
+			repo.Create(ctx, widget{Name: "e"})
+			panic("boom")
+		})
+	}()
+	if names(ctx) != "a,c" {
+		t.Fatalf("a panic rolls back: %q", names(ctx))
+	}
+}
+
+func TestTransactionalInjection(t *testing.T) {
+	type service struct{ Transactional }
+	pool := &pgxpool.Pool{}
+	m := &di.Module{Name: "s", Providers: []any{service{}}}
+	c := di.New(pool)
+	if err := c.Load(m); err != nil {
+		t.Fatal(err)
+	}
+	if got := c.Providers(m)[0].(*service).DB; got != pool {
+		t.Fatalf("the embedded Transactional must get the pool: %v", got)
 	}
 }
