@@ -170,6 +170,40 @@ func TestRepository(t *testing.T) {
 		t.Fatalf("transaction must roll back: %v, %d rows", err, n)
 	}
 
+	if n, err := repo.Count(ctx, nil); err != nil || n != 2 {
+		t.Fatalf("count all: %v %v", n, err)
+	}
+	if n, err := repo.Count(ctx, Args{"owner_id": nil}); err != nil || n != 1 {
+		t.Fatalf("count filter: %v %v", n, err)
+	}
+	if ok, err := repo.Exists(ctx, Args{"name": "a2"}); err != nil || !ok {
+		t.Fatalf("exists: %v %v", ok, err)
+	}
+	if ok, err := repo.Exists(ctx, Args{"name": "zz"}); err != nil || ok {
+		t.Fatalf("not exists: %v %v", ok, err)
+	}
+
+	zero := 0
+	if u, err := repo.Update(ctx, a.ID, struct{ OwnerID *int }{&zero}); err != nil || *u.OwnerID != 0 {
+		t.Fatalf("update: a non-nil pointer writes its zero value: %+v %v", u, err)
+	}
+
+	// JPA style: load, change, save; zero values are written too
+	loaded, err := repo.GetByID(ctx, a.ID)
+	must(err)
+	loaded.Active, loaded.OwnerID, loaded.Name = true, nil, ""
+	if s, err := repo.Save(ctx, loaded); err != nil || s.Name != "" || s.OwnerID != nil || !s.Active || s.ID != a.ID {
+		t.Fatalf("save writes every column: %+v %v", s, err)
+	}
+	created, err := repo.Save(ctx, widget{Name: "c"})
+	if err != nil || created.ID == "" || created.Active {
+		t.Fatalf("save with a zero primary key inserts every column but the key (no column default): %+v %v", created, err)
+	}
+	must(repo.Delete(ctx, created.ID))
+	if _, err := repo.Save(ctx, widget{ID: "00000000-0000-0000-0000-000000000000", Name: "x"}); !errors.Is(err, common.ErrNotFound) {
+		t.Fatalf("save of a missing row: %v", err)
+	}
+
 	must(repo.Delete(ctx, a.ID))
 	if err := repo.Delete(ctx, a.ID); !errors.Is(err, common.ErrNotFound) {
 		t.Fatalf("delete twice: %v", err)
