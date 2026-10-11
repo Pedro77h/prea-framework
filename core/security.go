@@ -23,7 +23,7 @@ type Security struct {
 	CSRF           *CSRF             // nil: no cross-origin request protection
 	Headers        map[string]string // set on every response
 	TrustedProxies []string          // nil: trust no proxy, ClientIP is the peer address
-	Middlewares    []Middleware      // your own protections: rate limit, CSRF token, IP allowlist...
+	Middlewares    []any             // your own protections, functions or components: rate limit, CSRF token, IP allowlist...
 }
 
 type CORS struct {
@@ -81,8 +81,7 @@ func (s Security) apply(engine *gin.Engine) error {
 		}
 		engine.Use(mw)
 	}
-	engine.Use(s.Middlewares...)
-	return nil
+	return nil // Middlewares are resolved by the container, see App.engine
 }
 
 // Headers sets the given headers on every response. Usable per module or route.

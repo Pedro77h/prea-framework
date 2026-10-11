@@ -68,7 +68,7 @@ func TestSecurityCustom(t *testing.T) {
 		Security: Security{
 			CORS: &CORS{AllowOriginFunc: subdomain},
 			CSRF: &CSRF{Deny: func(c *gin.Context) { c.AbortWithStatus(418) }},
-			Middlewares: []Middleware{func(c *gin.Context) {
+			Middlewares: []any{func(c *gin.Context) {
 				if c.GetHeader("X-Blocked") != "" {
 					c.AbortWithStatus(429)
 					return
@@ -76,7 +76,7 @@ func TestSecurityCustom(t *testing.T) {
 				c.Next()
 			}},
 		},
-		Middlewares: []Middleware{trace("global")},
+		Middlewares: []any{trace("global")},
 	}.Build(t.Context())
 	if err != nil {
 		t.Fatal(err)

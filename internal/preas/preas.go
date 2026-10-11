@@ -25,7 +25,7 @@ var Server = core.Server{
 	ShutdownTimeout: 15 * time.Second,
 }
 
-var Middlewares = []core.Middleware{
+var Middlewares = []any{
 	core.RequestLogger,
 	core.Recovery,
 }

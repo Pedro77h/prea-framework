@@ -1,9 +1,12 @@
 package core
 
 import (
+	"context"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"prea/di"
 
 	"github.com/gin-gonic/gin"
 )
@@ -33,17 +36,17 @@ func TestMiddlewareLevels(t *testing.T) {
 	users := &Module{
 		Name:        "users",
 		Providers:   []any{usersRoutes{routes{path: "/users"}}},
-		Middlewares: []Middleware{trace("users")},
+		Middlewares: []any{trace("users")},
 	}
 	admin := &Module{
 		Name:        "admin",
 		Imports:     []*Module{users},
 		Providers:   []any{adminRoutes{routes{path: "/admin", before: []Middleware{trace("route")}}}},
-		Middlewares: []Middleware{trace("admin")},
+		Middlewares: []any{trace("admin")},
 	}
 
 	// users is only reachable through admin's imports: it must still be mounted.
-	engine, _, err := App{Modules: []*Module{admin}, Middlewares: []Middleware{trace("global")}}.Build(t.Context())
+	engine, _, err := App{Modules: []*Module{admin}, Middlewares: []any{trace("global")}}.Build(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,7 +70,7 @@ func TestAbort(t *testing.T) {
 	engine, _, err := App{Modules: []*Module{{
 		Name:        "m",
 		Providers:   []any{routes{path: "/x"}},
-		Middlewares: []Middleware{deny},
+		Middlewares: []any{deny},
 	}}}.Build(t.Context())
 	if err != nil {
 		t.Fatal(err)
@@ -104,5 +107,125 @@ func TestAppsAreIsolated(t *testing.T) {
 		if w.Body.String() != text {
 			t.Fatalf("app with %q answered %q: components leaked between apps", text, w.Body)
 		}
+	}
+}
+
+type secret struct{ value string }
+
+// guard is a middleware component: it needs injection.
+type guard struct {
+	Secret *secret `inject:""`
+	inits  int
+}
+
+func (g *guard) Init(context.Context) error { g.inits++; return nil }
+
+func (g *guard) Handle(c *gin.Context) {
+	if c.GetHeader("X-Secret") != g.Secret.value {
+		c.AbortWithStatus(401)
+		return
+	}
+	c.Next()
+}
+
+// panel also injects the guard, to check both get the same instance.
+type panel struct {
+	Guard *guard `inject:""`
+}
+
+func (p *panel) Register(r gin.IRouter) {
+	r.GET("/panel", func(c *gin.Context) { c.String(200, "%d", p.Guard.inits) })
+}
+
+func TestMiddlewareComponents(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	request := func(engine *gin.Engine, header string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest("GET", "/panel", nil)
+		r.Header.Set("X-Secret", header)
+		w := httptest.NewRecorder()
+		engine.ServeHTTP(w, r)
+		return w
+	}
+
+	for name, providers := range map[string][]any{
+		"only in Middlewares":        {panel{}},
+		"also declared in Providers": {guard{}, panel{}},
+	} {
+		admin := &Module{Name: "admin", Providers: providers, Middlewares: []any{trace("fn"), guard{}}}
+		engine, _, err := App{Modules: []*Module{admin}, Globals: []any{&secret{"s3"}}}.Build(t.Context())
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if w := request(engine, "wrong"); w.Code != 401 || w.Header().Get("X-Trace") != "fn" {
+			t.Fatalf("%s: functions and components run in order: %d %v", name, w.Code, w.Header())
+		}
+		if w := request(engine, "s3"); w.Code != 200 || w.Body.String() != "1" {
+			t.Fatalf("%s: one instance, injected and initialized once: %d %q", name, w.Code, w.Body)
+		}
+	}
+
+	for want, mw := range map[string]any{
+		"must be declared as a value":                                    &guard{},
+		"must be a core.Middleware or a struct whose pointer has Handle": secret{},
+		"no provider for *core.secret":                                   guard{},
+	} {
+		globals := []any{&secret{}}
+		if want == "no provider for *core.secret" {
+			globals = nil
+		}
+		_, _, err := App{Modules: []*Module{{Name: "m", Middlewares: []any{mw}}}, Globals: globals}.Build(t.Context())
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("want %q, got %v", want, err)
+		}
+	}
+}
+
+type events struct{ log []string }
+
+// limiter is a global middleware component that injects a module's export.
+type limiter struct {
+	Secret *secret `inject:""`
+	Events *events `inject:""`
+}
+
+func (l *limiter) Init(context.Context) error {
+	l.Events.log = append(l.Events.log, "init")
+	return nil
+}
+func (l *limiter) Close(context.Context) error {
+	l.Events.log = append(l.Events.log, "close")
+	return nil
+}
+
+func (l *limiter) Handle(c *gin.Context) { trace("limiter:" + l.Secret.value)(c) }
+
+func TestGlobalMiddlewareComponents(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ev := &events{}
+	users := &Module{Name: "users", Providers: []any{di.Export(secret{"users"}), panel{}, guard{}}}
+	engine, closer, err := App{
+		Modules:     []*Module{users},
+		Security:    Security{Middlewares: []any{limiter{}}},
+		Middlewares: []any{trace("fn"), limiter{}},
+		Globals:     []any{ev},
+	}.Build(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+	engine.ServeHTTP(w, httptest.NewRequest("GET", "/panel", nil))
+	if got := w.Header().Get("X-Trace"); got != "limiter:users>fn>limiter:users" {
+		t.Fatalf("security first, then the app's, in order, injected with the module export: %q", got)
+	}
+	if err := closer(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(ev.log, ",") != "init,close" {
+		t.Fatalf("one instance for both lists, managed by the container: %v", ev.log)
+	}
+
+	_, _, err = App{Middlewares: []any{limiter{}}, Globals: []any{ev}}.Build(t.Context())
+	if err == nil || !strings.Contains(err.Error(), "no provider for *core.secret") {
+		t.Fatalf("a global component without its dependency must fail at startup: %v", err)
 	}
 }
