@@ -18,8 +18,9 @@ type Handler struct {
 var _ core.Router = (*Handler)(nil)
 
 func (h *Handler) Register(r gin.IRouter) {
-	// Middlewares go before the handler: g.GET("", middleware.Auth, h.list)
-	g := r.Group("/{{.Pkg}}")
+	// Middlewares go before the handler: g.GET("", h.Auth.Handle, h.list),
+	// with Auth *middleware.Auth `inject:""` in the Handler struct.
+	g := r.Group("/{{.Route}}")
 	g.GET("", h.list)
 	g.GET("/:id", h.get)
 	g.POST("", h.create)

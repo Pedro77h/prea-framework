@@ -2,10 +2,10 @@ package {{.Pkg}}
 
 import "{{.Framework}}/database"
 
-// Repository gets GetAll, GetByID, Where, First, Create, Update and Delete
-// from BaseRepository. Write custom queries with r.Prepare:
+// Repository gets GetAll, GetByID, Where, First, Count, Exists, Create,
+// Update, Save and Delete from BaseRepository. Write custom queries with r.Prepare:
 //
-//	r.Prepare("select * from {{.Pkg}} where name ilike @q").Bind("q", "%"+q+"%").All(ctx)
+//	r.Prepare("select * from {{.Table}} where name ilike @q").Bind("q", "%"+q+"%").All(ctx)
 type Repository struct {
 	database.BaseRepository[{{.Name}}]
 }

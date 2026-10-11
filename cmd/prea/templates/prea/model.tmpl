@@ -1,6 +1,6 @@
 package {{.Pkg}}
 
-// {{.Name}} maps a row of the "{{.Pkg}}" table. Columns match fields by name
+// {{.Name}} maps a row of the "{{.Table}}" table. Columns match fields by name
 // (snake_case); use a `db` tag to override.
 type {{.Name}} struct {
 	ID   string `json:"id"`
@@ -8,5 +8,5 @@ type {{.Name}} struct {
 }
 
 func ({{.Name}}) Table() string {
-	return "{{.Pkg}}"
+	return "{{.Table}}"
 }

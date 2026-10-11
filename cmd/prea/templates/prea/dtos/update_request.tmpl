@@ -1,6 +1,7 @@
 package dtos
 
-// UpdateRequest fields map to {{.Pkg}} columns; zero values are not updated.
+// UpdateRequest fields map to {{.Table}} columns; zero values are not updated.
+// To allow setting a zero value, use a pointer: nil keeps the column.
 type UpdateRequest struct {
 	Name string `json:"name"`
 }

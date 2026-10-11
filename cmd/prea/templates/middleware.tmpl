@@ -6,11 +6,22 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-var _ core.Middleware = {{.Name}}
+// {{.Name}} is a component: the container creates it, fills the inject
+// fields and calls Init/Close if you add them.
+//
+// Global:      preas.Middlewares = []any{..., middleware.{{.Name}}{}}
+//              (injects Globals and any module's exports)
+// Per module:  Middlewares: []any{middleware.{{.Name}}{}}
+// Per route:   declare middleware.{{.Name}}{} in Providers, inject it in the
+//              handler ({{.Name}} *middleware.{{.Name}} `inject:""`) and use
+//              g.GET("", h.{{.Name}}.Handle, h.list)
+type {{.Name}} struct {
+	// Service *some.Service `inject:""`
+}
 
-// {{.Name}} can be used per route (g.GET("", middleware.{{.Name}}, h.list)),
-// per module (core.Module.Middlewares) or globally (preas.Middlewares).
-func {{.Name}}(c *gin.Context) {
+var _ core.MiddlewareComponent = (*{{.Name}})(nil)
+
+func (m *{{.Name}}) Handle(c *gin.Context) {
 	// before the handler
 
 	c.Next() // or c.Abort() to stop the chain
