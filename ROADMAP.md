@@ -15,12 +15,12 @@ Severidade dos gaps: **Crítica** = quebra o isolamento ou a correção do frame
 | Baixa | Sem refresh token: quando o token expira, é preciso fazer login de novo. | `auth` |
 
 **Resolvidos:**
-- A `JWTKEY` é obrigatória, com pelo menos 32 bytes. Sem ela, a app não sobe (o `init` do `security` faz panic) e `CreateToken`/`DecodeToken` devolvem erro. Em `go test` não há panic; o teste define `security.SignKey`.
+- O segredo do JWT (`security.jwt.secret`) é obrigatório, com pelo menos 32 bytes. Sem ele, a app não sobe (`security.SetSignKey` falha no `main`) e `CreateToken`/`DecodeToken` devolvem erro. Os testes definem `security.SignKey`.
 - `DecodeToken` aceita só HS256 (`jwt.WithValidMethods`).
 - CORS, CSRF (via `net/http.CrossOriginProtection`), headers de segurança e proxies confiáveis são configurados em `core.Security` no `preas.go`. Por padrão, nenhum proxy é confiável.
-- Foi criado o `ErrForbidden` (403). O exemplo tem o `middleware.Owner`: só o dono altera ou apaga o próprio usuário.
+- Existe o 403 (`core.NewError(http.StatusForbidden, ...)`). O exemplo tem o `middleware.Owner`: só o dono altera ou apaga o próprio usuário.
 - Revogação: o `jti` do token fica em `users.token` e o `middleware.Auth` confere com o banco. Um novo login invalida o token anterior, e existe o `POST /auth/logout`.
-- O `GIN_MODE` é lido do ambiente e do `.env`. Antes, o gin lia a variável antes de o `.env` ser carregado.
+- O modo do gin vem de `server.mode`, que o `main` aplica depois de carregar a config. Antes, o gin lia o `GIN_MODE` antes de o `.env` ser carregado.
 
 **Decisões (não são gaps):**
 - O cadastro com `profile`, a listagem aberta para quem está logado e o login sem rate limit fazem parte do exemplo, que é propositalmente simples.
@@ -38,7 +38,7 @@ Severidade dos gaps: **Crítica** = quebra o isolamento ou a correção do frame
 - Os timeouts do `http.Server` são configuráveis em `preas.Server` e têm padrões seguros.
 - O banco recebe um `Ping` na subida, com timeout de 5s.
 - Respostas: o envelope `{text, code, data}` é montado com `core.Reply` e partes (`Text`, `Code`, `Data`); o `core.Response` serve para formatos próprios. O JSON só sai indentado em modo debug.
-- Logs: o pacote `logger` (slog) tem os níveis debug, info, success e error, configurados por `LOG_LEVEL` e `LOG_FORMAT`. O `core.RequestLogger` escolhe o nível pelo status e loga o erro real dos 500, e o `core.Recovery` loga panics com stack. A saída do gin vira debug.
+- Logs: o pacote `logger` (slog) tem os níveis debug, info, success e error, configurados por `logging.level` e `logging.format`. O `core.RequestLogger` escolhe o nível pelo status e loga o erro real dos 500, e o `core.Recovery` loga panics com stack. A saída do gin vira debug.
 - A config de segurança (headers, origens) é copiada quando o middleware é criado, então alterá-la depois não gera data race.
 
 **Decisões (não são gaps):** health check, request id e métricas dependem da aplicação, e o usuário cria como módulo ou middleware.
@@ -47,9 +47,9 @@ Severidade dos gaps: **Crítica** = quebra o isolamento ou a correção do frame
 
 | Sev. | Gap | Onde |
 |---|---|---|
-| Média | As variáveis de ambiente (`PGCONN`, `JWTKEY`, `PORT`, `GIN_MODE`, `LOG_LEVEL`, `LOG_FORMAT`) são lidas em lugares diferentes, e o `.env` é carregado por um import com efeito colateral. | `common/env.go`, `security/jwt.go`, `logger`, `core/app.go`, `cmd/server/main.go` |
+| — | Nenhum gap aberto. | |
 
-**Decisão:** este gap será resolvido pelos **prea profiles** (passo 1). Até lá, nada muda aqui, para não criar uma camada de config que seria substituída logo depois.
+**Resolvido (passo 1):** as variáveis de ambiente eram lidas em lugares diferentes, e o `.env` era carregado por um import com efeito colateral (`common/env.go`, removido). Agora tudo passa pelo pacote `config`, carregado uma vez no `main`; o `logger` e o `security` recebem a config na subida (`logger.Configure`, `security.SetSignKey`).
 
 ### Injeção de dependência (`di`)
 
@@ -129,28 +129,33 @@ Severidade dos gaps: **Crítica** = quebra o isolamento ou a correção do frame
 
 | Sev. | Gap | Onde |
 |---|---|---|
-| Baixa | Código morto em `common` (`Stoi64`, `ThrowException`), e o nome `common` é genérico demais. | `common` |
-| Baixa | A app de exemplo (`internal/preas`) mora dentro do repositório do framework. | `internal` |
-| Baixa | `middleware.Auth` depende de `auth/dtos`, um acoplamento entre preás. | `internal/middleware/auth.go` |
-| Baixa | Sem testes de services e handlers de `user`/`auth`; o teste de integração do banco só roda com env; não há CI nem docker-compose para Postgres local. | — |
+| Baixa | O teste de integração do banco só roda com env; não há CI nem docker-compose para Postgres local. | — |
+
+**Resolvidos:**
+- **Código morto em `common`:** o pacote foi removido, junto com o `Stoi64` e o `ThrowException`, que não eram usados. Os erros genéricos (`ErrNotFound`, `ErrUnauthorized`...) foram substituídos: erros de HTTP usam `core.NewError(http.StatusX, msg)`, com as constantes do `net/http`, e cada pacote declara os próprios erros (`database.ErrNotFound`, `database.ErrConflict`, `security.ErrInvalidToken`), que o `core.Error` converte em status.
+
+**Decisões (não são gaps):**
+- A app de exemplo (`internal/preas`) sai do repositório quando o framework for dividido em módulos (passo 5).
+- O acoplamento do `middleware.Auth` com `auth/dtos` é do exemplo. Os preás `user` e `auth` serão refeitos do zero, então eles não ganham testes de service e handler agora.
 
 ---
 
 ## Parte 2 — Próximos passos
 
-### 1. Configuração e profiles (estilo Spring)
+### 1. ~~Configuração e profiles (estilo Spring)~~ (feito)
 
-**Objetivo:** ter um único lugar para a configuração, que muda por ambiente.
+**Feito:**
+- **Pacote `config`, sobre o koanf:** carrega `application.yaml` e completa com `application-<profile>.yaml`. O profile, sempre um só, vem de `PREA_PROFILE` ou de `prea run --profile`.
+- **Ambiente:** só entra onde o yaml o referencia, com `${VAR}`. Não há sobrescrita automática por variável. O `.env` é lido sem substituir o que já está no ambiente.
+- **Tag `value:"chave"` no `di`:** serve para valores soltos e para blocos inteiros (pelas tags `yaml`), com conversão de tipos (`"true"` → bool, `"30s"` → `time.Duration`). Uma chave que não está no yaml, ou um `${VAR}` não definido, deixa o campo zerado (`nil` em ponteiros). O `*config.Config` é injetável.
+- **`core.Module.Profiles`:** restringe um módulo a um profile.
+- **Os yaml são da aplicação, não do framework.** Na app de exemplo eles ficam em `internal/config/`; com o `prea new`, a pasta `config/` vem no boilerplate.
 
-**Proposta:**
-- Os arquivos ficam em `config/`: `application.yaml` é a base e `application-<profile>.yaml` sobrescreve por ambiente (`dev`, `test`, `prod`).
-- O profile ativo vem de `PREA_PROFILE=dev` ou de `prea run --profile dev`.
-- Variáveis de ambiente sobrescrevem qualquer chave (`PREA_DATABASE_URL` → `database.url`). Segredos ficam no ambiente, nunca no yaml commitado.
-- A config tipada é injetável: `Config *config.App \`inject:""\``. Para valores soltos, uma nova tag: `URL string \`value:"database.url"\``.
-- Módulos e middlewares podem ser restritos a um profile: `core.Module{Profiles: []string{"dev"}}`, por exemplo para endpoints de debug só em dev.
-- A validação acontece na subida: falta de chave obrigatória ou `jwt.secret` curto demais impede o servidor de subir.
+**Decisões:**
+- YAML com o koanf, em vez de um loader próprio.
+- Sem vários profiles ao mesmo tempo e sem middleware por profile.
 
-**Decisões em aberto:** yaml ou toml; usar uma lib pronta (koanf, viper) ou um loader próprio e mínimo.
+**Ficou para depois:** validar blocos de config com tags, que vem com o passo 8.
 
 ### 2. Migrations do usuário
 
@@ -212,16 +217,18 @@ type User struct {
   | Módulo | Depende de |
   |---|---|
   | `prea/di` | nada |
-  | `prea/errs` (o atual `common`, renomeado e sem código morto) | nada |
-  | `prea/core` | `di`, `errs`, gin |
-  | `prea/database` + um submódulo por driver | `errs` |
-  | `prea/security` | `errs` |
+  | `prea/config` | goccy/go-yaml, godotenv |
+  | `prea/logger` | nada |
+  | `prea/core` | `di`, `config`, `logger`, `database`, `security`, gin |
+  | `prea/database` + um submódulo por driver | nada do framework |
+  | `prea/security` | nada |
   | `prea/cli` (o atual `cmd/prea`) | nada do framework |
 
 - A app de exemplo (`internal/preas`) sai do repositório do framework e vira o template do `prea new`.
 - A CLI ganha `prea new` (o template de projeto), `prea migrate` (passo 2) e `prea dev` (hot reload).
 
 **Decisões em aberto:**
+- **O `core.Error` importa o `database` e o `security`** para converter os erros deles, então o módulo `core` traz junto o pgx, o jwt e o argon2. Se isso pesar, a saída é inverter: o `core.Error` reconhece qualquer erro com um método `Status() int`, e cada pacote implementa esse método nos próprios erros.
 - **Caminho baixável.** O `go get` só baixa módulos cujo caminho começa com um domínio (`github.com/...`, `prea.dev/...`). Um caminho `prea/core` funciona com `replace`/`go.work`, mas não pelo proxy. Opções: um domínio de *vanity import* (`prea.dev/core`, com a `frameworkModule` da CLI apontando para ele), ou `github.com/<org>/prea/core`.
 - Política de versão: todos os módulos com a mesma versão ou cada um com a sua.
 
@@ -234,7 +241,7 @@ type User struct {
 meu-app/
 ├── go.mod          # require prea/core ...
 ├── prea.go         # único arquivo que conversa com o framework
-├── config/         # application.yaml + profiles
+├── config/         # application.yaml + profiles (vem com o prea new)
 ├── migrations/
 ├── middleware/
 └── preas/
@@ -262,7 +269,7 @@ func main() {
 
 **Proposta, por prioridade:**
 1. ~~Segredo obrigatório e validado na subida; `jwt.WithValidMethods`.~~ Feito.
-2. **Autorização**: `middleware.Require("admin")` com papéis e permissões vindos das claims (o `ErrForbidden` já existe).
+2. **Autorização**: `middleware.Require("admin")` com papéis e permissões vindos das claims (o 403 já existe, com `core.NewError`).
 3. **Tokens**: issuer/audience e TTL configuráveis; refresh token com rotação. A revogação por `jti` já existe no exemplo (`users.token`); falta levá-la para o framework.
 4. **Chaves**: suporte a RS256/EdDSA e rotação por `kid`.
 5. **Senhas**: parâmetros do argon2 configuráveis; *rehash* no login quando os parâmetros mudam; política mínima de senha; hash fictício para usuário inexistente, deixando o tempo de resposta igual.
@@ -320,7 +327,7 @@ page, err := r.Search(ctx, spec, database.PageRequest{Page: 0, Size: 20, Sort: "
 ### Ordem sugerida
 
 0. ~~Gaps de segurança, servidor e DI; no banco, transação, `Save`, `Count`/`Exists` e seleção de campos~~ (feito).
-1. **Config e profiles**: base para segredos, banco, migrations e `prea.go`.
+1. ~~**Config e profiles**: base para segredos, banco, migrations e `prea.go`~~ (feito).
 2. **Migrations**: logo se torna necessário, e o runner também é usado pelo passo 3.
 3. **Separação em módulos e `prea.go`**: estabiliza a fronteira entre framework e usuário antes de crescer a API.
 4. **Multi-banco**: os drivers já nascem como módulos separados.
@@ -330,8 +337,7 @@ page, err := r.Search(ctx, spec, database.PageRequest{Page: 0, Size: 20, Sort: "
 8. **Specification e paginação** (passo 9): independente; resolve o `GetAll` sem limite.
 
 Todos os gaps Média e de banco que restam já têm passo definido:
-- configuração → passo 1;
-- só Postgres → passos 1 e 4;
+- só Postgres → passo 4;
 - migrations → passo 2;
 - PK fixa, mapeamento lax e lock otimista → passo 3;
 - `GetAll` sem limite → passo 9.

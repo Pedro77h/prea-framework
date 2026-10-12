@@ -35,13 +35,13 @@ Framework web modular para Go, inspirado no Spring e no Angular. Ele traz módul
 go install ./cmd/prea
 
 # 2. Configuração
-cp .env.example .env        # preencha PGCONN e JWTKEY (openssl rand -base64 32)
+cp .env.example .env        # preencha DATABASE_URL e JWT_SECRET (openssl rand -base64 32)
 
 # 3. Banco: por enquanto as migrations são aplicadas manualmente
-psql "$PGCONN" -f internal/preas/user/migrations/user.sql
+psql "$DATABASE_URL" -f internal/preas/user/migrations/user.sql
 
 # 4. Subir o servidor
-prea run -p 8000            # compila ./cmd/server e roda com PORT=8000
+prea run --profile dev      # compila ./cmd/server e roda com o profile dev
 ```
 
 Para testar:
@@ -68,17 +68,18 @@ prea/
 │   │   └── templates/       # templates embutidos no binário
 │   └── server/              # entrypoint da aplicação
 ├── internal/                # código da aplicação
+│   ├── config/              # application.yaml e um arquivo por profile
 │   ├── preas/
 │   │   ├── preas.go         # módulos, segurança HTTP e middlewares globais
 │   │   ├── user/
 │   │   └── auth/
 │   └── middleware/          # middlewares da aplicação
-├── core/                    # framework: Module, App, Router, Middleware, Security, respostas
+├── core/                    # framework: Module, App, Router, Middleware, Security, respostas e `core.NewError`
 ├── di/                      # framework: container de injeção
 ├── database/                # framework: BaseRepository, Prepare
 ├── security/                # framework: JWT e hash de senha (argon2id)
 ├── logger/                  # framework: logs por nível (slog)
-└── common/                  # framework: erros de domínio e env
+└── config/                  # framework: carrega a config (koanf) e os profiles
 ```
 
 Direção das dependências: **CLI → nada**, **app → framework**, **framework → nada da app**.
@@ -216,7 +217,7 @@ func (h *Handler) Register(r gin.IRouter) {
 }
 ```
 
-**Service.** Guarda as regras de negócio e devolve os erros de domínio (veja [Erros e respostas](#erros-e-respostas)).
+**Service.** Guarda as regras de negócio e devolve erros com status (veja [Erros e respostas](#erros-e-respostas)).
 
 **Model.** A struct da tabela, com o método `Table()`:
 
@@ -381,23 +382,32 @@ time=2026-10-10T03:09:47.989-03:00 level=SUCCESS msg=request method=POST path=/u
 ```
 
 - **Argumentos** são pares chave/valor. A saída é estruturada (`log/slog`), em texto ou JSON.
-- **`LOG_LEVEL`** define o nível mínimo, e o padrão é `info`. Com `debug`, aparece também a saída do gin (rotas registradas, avisos).
-- **`LOG_FORMAT=json`** é a opção para produção ou para coletores de log.
+- **`logging.level`** (veja [Configuração](#configuração)) define o nível mínimo, e o padrão é `info`. Com `debug`, aparece também a saída do gin (rotas registradas, avisos).
+- **`logging.format: json`** é a opção para produção ou para coletores de log; o profile `prod` já usa.
+- **`logger.Configure(level, format)`** aplica a config na subida; antes disso, o logger usa `info` em texto.
 - **`logger.Log`** é o `*slog.Logger` por trás e também o default do `slog`. Assim, o `log.Printf` e o `slog.Info` de qualquer lib caem no mesmo lugar. Para um logger próprio, como em testes ou outro destino, use `logger.New(w, level, json)`.
 - **`core.RequestLogger`** gera uma linha por requisição: **success** abaixo de 400, **info** para 4xx e **error** para 5xx. Numa linha de 500 vem junto o erro real que foi passado ao `core.Error`; o cliente só vê "internal server error".
 - **`core.Recovery`** transforma um panic em 500 e loga o erro com a stack trace.
 
 ### Erros e respostas
 
-O service devolve os erros de `common`, com contexto via `fmt.Errorf("%w: ...")`, e o handler chama `core.Error(c, err)`:
+Erros de HTTP usam as constantes do `net/http`: o service ou o handler devolve um `core.NewError(status, mensagem)`, e o handler chama `core.Error(c, err)`, que responde com esse status e a mensagem:
+
+```go
+if u.ID != claims.Payload.ID {
+	return core.NewError(http.StatusForbidden, "not the owner")
+}
+```
+
+Os pacotes do framework declaram os próprios erros, como o `io.EOF` e o `sql.ErrNoRows`, sem depender de HTTP. O `core.Error` os converte:
 
 | Erro | HTTP |
 |---|---|
-| `common.ErrInvalidInput` | 400 |
-| `common.ErrUnauthorized` | 401 |
-| `common.ErrForbidden` | 403 |
-| `common.ErrNotFound` | 404 |
-| `common.ErrConflict` | 409 |
+| `*core.HTTPError` (`core.NewError`) | o status do erro |
+| `database.ErrInvalidInput` | 400 |
+| `database.ErrNotFound` | 404 |
+| `database.ErrConflict` | 409 |
+| `security.ErrInvalidToken` | 401 |
 | qualquer outro | 500, com mensagem genérica; o erro real vai para o log |
 
 Os erros chegam ao cliente como `{"text": "...", "code": 2}`.
@@ -506,7 +516,7 @@ As senhas são guardadas com hash argon2id. Os tokens são HS256, e só esse alg
 
 | Comando | O que faz |
 |---|---|
-| `prea run [-p 8000]` | compila e sobe o `./cmd/server`, repassando os sinais para o desligamento gracioso; a porta também pode vir de `$PORT` |
+| `prea run [--profile dev]` | compila e sobe o `./cmd/server`, repassando os sinais para o desligamento gracioso; a porta vem do `server.port` da config |
 | `prea g p <Nome>` | cria `internal/preas/<nome>/` (module, handler, service, repository, model e dtos) e registra o módulo em `preas.go` |
 | `prea g m <Nome> [--func]` | cria `internal/middleware/<nome>.go`: um componente (com injeção), ou uma função com `--func` |
 
@@ -532,16 +542,49 @@ No middleware, o arquivo segue a tabela: `prea g m rate_limit` cria `internal/mi
 
 ## Configuração
 
-As variáveis podem vir do ambiente ou de um `.env` na raiz (veja o `.env.example`):
+No estilo do Spring: `application.yaml` é a base, e `application-<profile>.yaml` a completa para o profile ativo. Os arquivos são da aplicação; na app de exemplo, ficam em `internal/config/`. O carregamento usa o [koanf](https://github.com/knadh/koanf).
 
-| Variável | Uso |
-|---|---|
-| `PGCONN` | DSN do Postgres, ex.: `postgres://user:pass@localhost:5432/prea` |
-| `JWTKEY` | segredo do JWT, com 32+ bytes; **obrigatório** se a app usa o pacote `security`, ou ela não sobe |
-| `PORT` | porta HTTP (padrão `8000`) |
-| `GIN_MODE` | `debug` (padrão), `release` ou `test`; use `release` em produção. Pode ficar no `.env` |
-| `LOG_LEVEL` | `debug`, `info` (padrão), `success` ou `error`; um valor inválido impede a subida |
-| `LOG_FORMAT` | `text` (padrão) ou `json` |
+```yaml
+# internal/config/application.yaml
+server:
+  port: 8000
+database:
+  url: ${DATABASE_URL}     # vem do ambiente ou do .env
+security:
+  jwt:
+    secret: ${JWT_SECRET}
+```
+
+- **Profile ativo:** um só, vindo de `PREA_PROFILE=dev` ou de `prea run --profile dev`. Sem profile, só a base é carregada; um arquivo que não existe é ignorado.
+- **Ambiente:** só entra onde o yaml o referencia, com `${VAR}`. O `.env` da raiz é lido antes (veja o `.env.example`) e não substitui o que já está no ambiente. Segredos ficam no ambiente, nunca no yaml commitado.
+- **Chave ausente:** uma chave que não está no yaml, ou um `${VAR}` não definido, deixa o valor zerado (`nil` em ponteiros). Quem precisa do valor valida, como o `security.SetSignKey`, que impede a subida com um segredo curto.
+
+Na app de exemplo, o `cmd/server/main.go` lê `server.port`, `server.mode` (modo do gin), `logging.level`, `logging.format`, `database.url` e `security.jwt.secret`.
+
+**Nos componentes**, a tag `value:"chave"` preenche o campo na subida, como o `@Value` do Spring:
+
+```go
+type Mailer struct {
+	Addr    string        `value:"mail.addr"`
+	Timeout time.Duration `value:"mail.timeout"` // "30s" no yaml
+	Mail    MailConfig    `value:"mail"`         // o bloco inteiro, como o @ConfigurationProperties
+}
+
+type MailConfig struct {
+	Addr string `yaml:"addr"`
+	From string `yaml:"from"`
+}
+```
+
+- Os valores são convertidos para o tipo do campo: `"true"` → bool, `"8000"` → int, `"30s"` → `time.Duration`.
+- Como no `inject`, um campo preenchido na declaração é mantido (`Mailer{Addr: "localhost:25"}` em testes).
+- O `*config.Config` também é injetável (``Config *config.Config `inject:""` ``), por exemplo para ler `cfg.Profile()`.
+
+**Módulos por profile:** `Profiles` restringe o módulo a esses profiles. Vale para os módulos listados em `core.App.Modules`:
+
+```go
+var Module = &core.Module{Name: "debug", Providers: []any{Handler{}}, Profiles: []string{"dev"}}
+```
 
 ## Testes
 

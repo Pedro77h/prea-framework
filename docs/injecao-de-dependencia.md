@@ -131,6 +131,7 @@ Outras regras:
 - **Campos já preenchidos são mantidos.** Se a declaração já traz `Service{Repo: mock}`, o `Repo` não é sobrescrito.
 - **Structs embutidas são percorridas.** É assim que o `database.BaseRepository[T]` embutido no seu repository recebe o `DB`.
 - **Ciclos entre componentes são permitidos.** A pode injetar B e B injetar A, porque são ponteiros. Ciclos entre *módulos* não são permitidos.
+- **Valores de config usam `value:"chave"`**, como o `@Value` do Spring: `Addr string \`value:"mail.addr"\``. A fonte é um componente que implementa `di.Values`, achado pelas mesmas regras de um `inject:""`; normalmente é o `*config.Config` que o `core.App.Config` coloca nos globais. Uma chave que não está no yaml deixa o campo zerado. Veja [Configuração no README](../README.md#configuração).
 
 **Interfaces evitam ciclos de import entre pacotes.** O `middleware.Auth` precisa consultar a sessão do usuário, mas o pacote `user` já importa `middleware`. Por isso o `Auth` depende de uma interface, e o `user.Service` a implementa:
 
@@ -402,6 +403,7 @@ Todos os erros aparecem **na subida**, nunca no meio de uma requisição. Eles v
 | `S.F: no provider for *X named "a"` | não há componente com esse nome | confira o `di.Named("a", ...)` |
 | `S.F: 2 providers for *X: name them with di.Named and pick one with inject:"<name>"` | mais de um candidato | nomeie os componentes e use `inject:"nome"` |
 | `S.F: use the tag inject:"" (a bare inject is not a valid Go struct tag)` | tag curta `inject` | troque por `inject:""` |
+| `S.F: value:"k" needs a config (core.App.Config): no provider for di.Values` | campo `value` sem config na app | passe `Config: cfg` no `core.App` |
 | `core: module m: middleware T must be a core.Middleware or a struct whose pointer has Handle(*gin.Context)` | item de `Module.Middlewares` que não é função nem componente | implemente `Handle(c *gin.Context)` com receiver ponteiro |
 | `di: import cycle at module A` | A importa B, que importa A | extraia o que é comum para um terceiro módulo ou use uma interface |
 | `di: *X.Init: ...` | o `Init` de X falhou | o resto da mensagem é o erro do seu `Init` |
