@@ -1,6 +1,5 @@
-// Package logger is the framework logger: leveled, structured (log/slog) and
-// configured by env vars. LOG_LEVEL: debug | info | success | error (default
-// info). LOG_FORMAT: text | json (default text).
+// Package logger is the framework logger: leveled and structured (log/slog).
+// It starts at info, in text; Configure changes it at startup.
 package logger
 
 import (
@@ -10,8 +9,6 @@ import (
 	"log/slog"
 	"os"
 	"strings"
-
-	"prea/common"
 )
 
 // Level order: Debug < Info < Success < Error.
@@ -27,12 +24,22 @@ const (
 var Log *slog.Logger
 
 func init() {
-	level, err := ParseLevel(common.GetEnv("LOG_LEVEL"))
+	Configure("info", "text")
+}
+
+// Configure replaces Log (and slog's default) with one writing to stdout.
+// level: debug | info | success | error. format: text | json.
+func Configure(level, format string) error {
+	l, err := ParseLevel(level)
 	if err != nil {
-		panic(err)
+		return err
 	}
-	Log = New(os.Stdout, level, common.GetEnv("LOG_FORMAT") == "json")
+	if format != "" && format != "text" && format != "json" {
+		return fmt.Errorf("logger: invalid format %q (text or json)", format)
+	}
+	Log = New(os.Stdout, l, format == "json")
 	slog.SetDefault(Log)
+	return nil
 }
 
 // New builds a logger; use it in tests or to log somewhere else.
@@ -55,7 +62,7 @@ func ParseLevel(name string) (slog.Level, error) {
 	case "error":
 		return LevelError, nil
 	}
-	return 0, fmt.Errorf("logger: invalid LOG_LEVEL %q (debug, info, success or error)", name)
+	return 0, fmt.Errorf("logger: invalid level %q (debug, info, success or error)", name)
 }
 
 func levelName(_ []string, a slog.Attr) slog.Attr {

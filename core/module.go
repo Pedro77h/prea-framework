@@ -28,11 +28,15 @@ type MiddlewareComponent interface {
 // (middleware.Auth{}). A component is added to Providers when it is not
 // declared there, so it is created, injected and goes through Init/Close;
 // when it is, the same instance serves both.
+//
+// Profiles limits the module to those profiles (see App.Config); empty loads
+// it always. It applies to the modules listed in App.Modules.
 type Module struct {
 	Name        string
 	Imports     []*Module
 	Providers   []any
 	Middlewares []any
+	Profiles    []string
 }
 
 func (m *Module) Declare() *di.Module {

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"prea/config"
 	"prea/di"
 
 	"github.com/gin-gonic/gin"
@@ -227,5 +228,50 @@ func TestGlobalMiddlewareComponents(t *testing.T) {
 	_, _, err = App{Middlewares: []any{limiter{}}, Globals: []any{ev}}.Build(t.Context())
 	if err == nil || !strings.Contains(err.Error(), "no provider for *core.secret") {
 		t.Fatalf("a global component without its dependency must fail at startup: %v", err)
+	}
+}
+
+type mailer struct {
+	Addr string `value:"mail.addr"`
+	Port int    `value:"mail.port"`
+}
+
+func (m *mailer) Register(r gin.IRouter) {
+	r.GET("/mail", func(c *gin.Context) { c.String(200, "%s:%d", m.Addr, m.Port) })
+}
+
+func TestConfig(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	cfg := config.New("prod", map[string]any{"mail": map[string]any{"addr": "smtp", "port": 25}})
+	mail := &Module{Name: "mail", Providers: []any{mailer{}}}
+	debug := &Module{Name: "debug", Providers: []any{routes{path: "/debug"}}, Profiles: []string{"dev"}}
+
+	engine, _, err := App{Modules: []*Module{mail, debug}, Config: cfg}.Build(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for path, want := range map[string]int{"/mail": 200, "/debug": 404} {
+		w := httptest.NewRecorder()
+		engine.ServeHTTP(w, httptest.NewRequest("GET", path, nil))
+		if w.Code != want {
+			t.Errorf("%s: %d, want %d", path, w.Code, want)
+		}
+		if path == "/mail" && w.Body.String() != "smtp:25" {
+			t.Errorf("values not filled: %q", w.Body)
+		}
+	}
+
+	if _, _, err := (App{Modules: []*Module{mail}}).Build(t.Context()); err == nil || !strings.Contains(err.Error(), "needs a config") {
+		t.Fatalf("a value without config must fail at startup: %v", err)
+	}
+	empty := config.New("", nil)
+	engine, _, err = App{Modules: []*Module{mail}, Config: empty}.Build(t.Context())
+	if err != nil {
+		t.Fatalf("a missing key must leave the field zero: %v", err)
+	}
+	w := httptest.NewRecorder()
+	engine.ServeHTTP(w, httptest.NewRequest("GET", "/mail", nil))
+	if w.Body.String() != ":0" {
+		t.Fatalf("missing keys must stay zero: %q", w.Body)
 	}
 }

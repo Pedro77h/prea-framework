@@ -3,15 +3,12 @@ package security
 import (
 	"errors"
 	"fmt"
-	"testing"
 
 	"github.com/golang-jwt/jwt/v5"
-	"prea/common"
 )
 
 const (
 	DefaultAlg string = "HS256"
-	JwtEnv     string = "JWTKEY"
 	MinKeySize        = 32
 )
 
@@ -21,19 +18,20 @@ var (
 	ErrInvalidHashVersion = errors.New("invalid algorithm version") // stored hash from another argon2 version
 )
 
+// SignKey signs and checks the tokens; set it at startup with SetSignKey.
 var SignKey []byte
 
-func init() {
-	SignKey = []byte(common.GetEnv(JwtEnv))
-	// Fail at startup; tests set SignKey themselves.
-	if _, err := signKey(); err != nil && !testing.Testing() {
-		panic(err)
-	}
+// SetSignKey validates and sets SignKey; call it at startup so a short key
+// stops the app.
+func SetSignKey(key string) error {
+	SignKey = []byte(key)
+	_, err := signKey()
+	return err
 }
 
 func signKey() ([]byte, error) {
 	if len(SignKey) < MinKeySize {
-		return nil, fmt.Errorf("security: %s must be set with at least %d bytes (got %d)", JwtEnv, MinKeySize, len(SignKey))
+		return nil, fmt.Errorf("security: the jwt secret must have at least %d bytes (got %d)", MinKeySize, len(SignKey))
 	}
 	return SignKey, nil
 }

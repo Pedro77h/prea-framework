@@ -1,0 +1,14 @@
+# Base configuration; application-<profile>.yaml completes it for the active
+# profile (PREA_PROFILE or prea run --profile). The environment only enters
+# where it is referenced: ${VAR}. A key that isn't here is zero/nil.
+server:
+  port: 8000
+  mode: debug # debug | release | test
+logging:
+  level: info # debug | info | success | error
+  format: text # text | json
+database:
+  url: ${DATABASE_URL}
+security:
+  jwt:
+    secret: ${JWT_SECRET} # 32+ bytes: openssl rand -base64 32

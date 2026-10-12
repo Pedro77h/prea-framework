@@ -20,6 +20,13 @@ type Initializer interface {
 	Init(ctx context.Context) error
 }
 
+// Values fills the fields tagged value:"key"; a missing key must leave dst
+// as it is. It is resolved like an inject:"" field, so a global
+// *config.Config is the usual source.
+type Values interface {
+	Value(key string, dst any) error
+}
+
 type Closer interface {
 	Close(ctx context.Context) error
 }

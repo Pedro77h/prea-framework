@@ -17,12 +17,9 @@ func runCommand() *cli.Command {
 		Name:  "run",
 		Usage: "Build and run the project server (./cmd/server)",
 		Flags: []cli.Flag{
-			&cli.IntFlag{
-				Name:    "port",
-				Aliases: []string{"p"},
-				Value:   8000,
-				Usage:   "application port",
-				Sources: cli.EnvVars("PORT"),
+			&cli.StringFlag{
+				Name:  "profile",
+				Usage: "config profile: loads config/application-<profile>.yaml",
 			},
 		},
 		Action: func(ctx context.Context, cmd *cli.Command) error {
@@ -46,7 +43,10 @@ func runCommand() *cli.Command {
 			defer signal.Stop(signals)
 
 			server := exec.Command(bin)
-			server.Env = append(os.Environ(), fmt.Sprintf("PORT=%d", cmd.Int("port")))
+			server.Env = os.Environ()
+			if cmd.IsSet("profile") {
+				server.Env = append(server.Env, "PREA_PROFILE="+cmd.String("profile"))
+			}
 			server.Stdin, server.Stdout, server.Stderr = os.Stdin, os.Stdout, os.Stderr
 			if err := server.Start(); err != nil {
 				return err

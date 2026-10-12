@@ -1,0 +1,4 @@
+server:
+  mode: release
+logging:
+  format: json
