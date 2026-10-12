@@ -3,7 +3,9 @@ package core
 import (
 	"errors"
 	"net/http"
-	"prea/common"
+
+	"prea/database"
+	"prea/security"
 
 	"github.com/gin-gonic/gin"
 )
@@ -67,20 +69,22 @@ func codeFor(status int) int {
 	}
 }
 
-// Error maps domain errors to HTTP statuses. Unknown errors become a 500
-// with a generic message; the real error goes to gin's logger.
+// Error replies with the status of an HTTPError, and maps the errors of the
+// database and security packages. Unknown errors become a 500 with a generic
+// message; the real error goes to gin's logger.
 func Error(c *gin.Context, err error) {
+	var httpErr *HTTPError
 	switch {
-	case errors.Is(err, common.ErrNotFound):
+	case errors.As(err, &httpErr):
+		Reply(c, httpErr.Status, Text(httpErr.Error()))
+	case errors.Is(err, database.ErrNotFound):
 		Reply(c, http.StatusNotFound, Text(err.Error()))
-	case errors.Is(err, common.ErrInvalidInput):
+	case errors.Is(err, database.ErrInvalidInput):
 		Reply(c, http.StatusBadRequest, Text(err.Error()))
-	case errors.Is(err, common.ErrConflict):
+	case errors.Is(err, database.ErrConflict):
 		Reply(c, http.StatusConflict, Text("conflict"))
-	case errors.Is(err, common.ErrUnauthorized):
-		Reply(c, http.StatusUnauthorized, Text(err.Error()))
-	case errors.Is(err, common.ErrForbidden):
-		Reply(c, http.StatusForbidden, Text(err.Error()))
+	case errors.Is(err, security.ErrInvalidToken):
+		Reply(c, http.StatusUnauthorized, Text("invalid token"))
 	default:
 		c.Error(err)
 		Reply(c, http.StatusInternalServerError, Text("internal server error"))

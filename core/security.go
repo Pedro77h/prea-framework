@@ -10,8 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"prea/common"
-
 	"github.com/gin-gonic/gin"
 )
 
@@ -162,7 +160,7 @@ func (cfg CSRF) Middleware() (Middleware, error) {
 	deny := cfg.Deny
 	if deny == nil {
 		deny = func(c *gin.Context) {
-			Error(c, fmt.Errorf("%w: cross-origin request", common.ErrForbidden))
+			Error(c, NewError(http.StatusForbidden, "cross-origin request"))
 			c.Abort()
 		}
 	}

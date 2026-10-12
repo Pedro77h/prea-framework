@@ -2,9 +2,7 @@ package {{.Pkg}}
 
 import (
 	"{{.Import}}/dtos"
-	"fmt"
 	"net/http"
-	"{{.Framework}}/common"
 	"{{.Framework}}/core"
 
 	"github.com/gin-gonic/gin"
@@ -49,7 +47,7 @@ func (h *Handler) get(c *gin.Context) {
 func (h *Handler) create(c *gin.Context) {
 	var req dtos.CreateRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		core.Error(c, fmt.Errorf("%w: %v", common.ErrInvalidInput, err))
+		core.Error(c, core.NewError(http.StatusBadRequest, err.Error()))
 		return
 	}
 
@@ -64,7 +62,7 @@ func (h *Handler) create(c *gin.Context) {
 func (h *Handler) update(c *gin.Context) {
 	var req dtos.UpdateRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		core.Error(c, fmt.Errorf("%w: %v", common.ErrInvalidInput, err))
+		core.Error(c, core.NewError(http.StatusBadRequest, err.Error()))
 		return
 	}
 

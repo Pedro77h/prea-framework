@@ -4,9 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"prea/database"
+	"prea/security"
 	"strings"
 	"testing"
 	"time"
@@ -171,5 +174,26 @@ func TestServeLifecycle(t *testing.T) {
 	}
 	if _, err := net.Dial("tcp", ln.Addr().String()); err == nil {
 		t.Fatal("the listener must be closed when startup fails")
+	}
+}
+
+func TestErrorStatus(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for err, want := range map[error]int{
+		database.ErrNotFound:            404,
+		database.ErrInvalidInput:        400,
+		database.ErrConflict:            409,
+		NewError(403, "not the owner"):  403,
+		NewError(http.StatusTeapot, ""): 418,
+		security.ErrInvalidToken:        401,
+		security.ErrInvalidHash:         500,
+		errors.New("anything else"):     500,
+	} {
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		Error(c, fmt.Errorf("%w: wrapped", err))
+		if w.Code != want {
+			t.Errorf("%v: %d, want %d", err, w.Code, want)
+		}
 	}
 }

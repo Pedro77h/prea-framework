@@ -4,8 +4,8 @@ import (
 	"context"
 	"crypto/rand"
 	"errors"
-	"fmt"
-	"prea/common"
+	"net/http"
+	"prea/core"
 	"prea/database"
 	"prea/internal/preas/auth/dtos"
 	"prea/internal/preas/user"
@@ -24,15 +24,15 @@ type Service struct {
 
 func (s *Service) Login(ctx context.Context, username, password string) (dtos.Session, error) {
 	u, err := s.Users.GetByUsername(ctx, username)
-	if errors.Is(err, common.ErrNotFound) {
-		return dtos.Session{}, fmt.Errorf("%w: invalid credentials", common.ErrUnauthorized)
+	if errors.Is(err, database.ErrNotFound) {
+		return dtos.Session{}, core.NewError(http.StatusUnauthorized, "invalid credentials")
 	}
 	if err != nil {
 		return dtos.Session{}, err
 	}
 
 	if ok, err := security.ComparePassword(password, u.Password); err != nil || !ok {
-		return dtos.Session{}, fmt.Errorf("%w: invalid credentials", common.ErrUnauthorized)
+		return dtos.Session{}, core.NewError(http.StatusUnauthorized, "invalid credentials")
 	}
 
 	now := time.Now()
@@ -65,10 +65,10 @@ func (s *Service) Login(ctx context.Context, username, password string) (dtos.Se
 func (s *Service) Validate(ctx context.Context, token string) (security.DataClaims[dtos.Payload], error) {
 	claims, err := security.Jwt[dtos.Payload]{}.DecodeToken(token)
 	if err != nil {
-		return claims, fmt.Errorf("%w: invalid token", common.ErrUnauthorized)
+		return claims, core.NewError(http.StatusUnauthorized, "invalid token")
 	}
 	if active, err := s.Users.ActiveToken(ctx, claims.Payload.ID); err != nil || active != claims.ID {
-		return claims, fmt.Errorf("%w: session ended", common.ErrUnauthorized)
+		return claims, core.NewError(http.StatusUnauthorized, "session ended")
 	}
 	return claims, nil
 }

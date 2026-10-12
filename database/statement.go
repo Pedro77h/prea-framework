@@ -7,8 +7,6 @@ import (
 	"reflect"
 	"time"
 
-	"prea/common"
-
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
@@ -60,7 +58,7 @@ func (s *Statement[T]) All(ctx context.Context) ([]T, error) {
 	return items, translate(err)
 }
 
-// One returns exactly one row, or common.ErrNotFound.
+// One returns exactly one row, or ErrNotFound.
 func (s *Statement[T]) One(ctx context.Context) (T, error) {
 	rows, err := connFor(ctx, s.conn).Query(ctx, s.sql, s.args)
 	if err != nil {
@@ -96,16 +94,16 @@ func rowMapper[T any]() pgx.RowToFunc[T] {
 
 func translate(err error) error {
 	if errors.Is(err, pgx.ErrNoRows) {
-		return common.ErrNotFound
+		return ErrNotFound
 	}
 
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) {
 		switch pgErr.Code {
 		case "23505": // unique_violation
-			return fmt.Errorf("%w: %s", common.ErrConflict, pgErr.Message)
+			return fmt.Errorf("%w: %s", ErrConflict, pgErr.Message)
 		case "22P02", "23502", "23503", "23514": // bad text representation, not null, foreign key, check
-			return fmt.Errorf("%w: %s", common.ErrInvalidInput, pgErr.Message)
+			return fmt.Errorf("%w: %s", ErrInvalidInput, pgErr.Message)
 		}
 	}
 	return err

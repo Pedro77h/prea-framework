@@ -2,10 +2,9 @@ package middleware
 
 import (
 	"context"
-	"fmt"
+	"net/http"
 	"strings"
 
-	"prea/common"
 	"prea/core"
 	"prea/internal/preas/auth/dtos"
 	"prea/security"
@@ -34,21 +33,21 @@ var _ core.Middleware = Owner
 func (a *Auth) Handle(c *gin.Context) {
 	token, ok := strings.CutPrefix(c.GetHeader("Authorization"), "Bearer ")
 	if !ok {
-		core.Error(c, fmt.Errorf("%w: missing bearer token", common.ErrUnauthorized))
+		core.Error(c, core.NewError(http.StatusUnauthorized, "missing bearer token"))
 		c.Abort()
 		return
 	}
 
 	claims, err := security.Jwt[dtos.Payload]{}.DecodeToken(token)
 	if err != nil {
-		core.Error(c, fmt.Errorf("%w: invalid token", common.ErrUnauthorized))
+		core.Error(c, core.NewError(http.StatusUnauthorized, "invalid token"))
 		c.Abort()
 		return
 	}
 
 	active, err := a.Sessions.ActiveToken(c.Request.Context(), claims.Payload.ID)
 	if err != nil || active != claims.ID {
-		core.Error(c, fmt.Errorf("%w: session ended", common.ErrUnauthorized))
+		core.Error(c, core.NewError(http.StatusUnauthorized, "session ended"))
 		c.Abort()
 		return
 	}
@@ -61,7 +60,7 @@ func (a *Auth) Handle(c *gin.Context) {
 func Owner(c *gin.Context) {
 	claims := c.MustGet(ClaimsKey).(security.DataClaims[dtos.Payload])
 	if claims.Payload.ID != c.Param("id") {
-		core.Error(c, fmt.Errorf("%w: not the owner", common.ErrForbidden))
+		core.Error(c, core.NewError(http.StatusForbidden, "not the owner"))
 		c.Abort()
 		return
 	}

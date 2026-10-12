@@ -1,6 +1,7 @@
 package security
 
 import (
+	"errors"
 	"fmt"
 	"testing"
 
@@ -12,6 +13,12 @@ const (
 	DefaultAlg string = "HS256"
 	JwtEnv     string = "JWTKEY"
 	MinKeySize        = 32
+)
+
+var (
+	ErrInvalidToken       = errors.New("invalid token")             // bad signature, expired, wrong algorithm; core.Error answers 401
+	ErrInvalidHash        = errors.New("invalid hash")              // stored password hash is malformed
+	ErrInvalidHashVersion = errors.New("invalid algorithm version") // stored hash from another argon2 version
 )
 
 var SignKey []byte
@@ -65,7 +72,7 @@ func (Jwt[M]) DecodeToken(token string) (DataClaims[M], error) {
 
 	parsed, err := jwt.ParseWithClaims(token, &DataClaims[M]{}, keyFunc, jwt.WithValidMethods([]string{DefaultAlg}))
 	if err != nil {
-		return DataClaims[M]{}, err
+		return DataClaims[M]{}, fmt.Errorf("%w: %v", ErrInvalidToken, err)
 	}
 
 	return *parsed.Claims.(*DataClaims[M]), nil

@@ -1,9 +1,7 @@
 package auth
 
 import (
-	"fmt"
 	"net/http"
-	"prea/common"
 	"prea/core"
 	"prea/internal/middleware"
 	"prea/internal/preas/auth/dtos"
@@ -29,7 +27,7 @@ func (h *Handler) Register(r gin.IRouter) {
 func (h *Handler) login(c *gin.Context) {
 	var req dtos.LoginRequest
 	if err := c.ShouldBind(&req); err != nil {
-		core.Error(c, fmt.Errorf("%w: %v", common.ErrInvalidInput, err))
+		core.Error(c, core.NewError(http.StatusBadRequest, err.Error()))
 		return
 	}
 
@@ -44,7 +42,7 @@ func (h *Handler) login(c *gin.Context) {
 func (h *Handler) validate(c *gin.Context) {
 	var req dtos.ValidateRequest
 	if err := c.ShouldBind(&req); err != nil {
-		core.Error(c, fmt.Errorf("%w: %v", common.ErrInvalidInput, err))
+		core.Error(c, core.NewError(http.StatusBadRequest, err.Error()))
 		return
 	}
 

@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"prea/common"
 	"prea/di"
 
 	"github.com/jackc/pgx/v5"
@@ -105,13 +104,13 @@ func TestRepository(t *testing.T) {
 	_, err = repo.Create(ctx, widget{Name: "b"}) // zero ID is left to the default
 	must(err)
 
-	if _, err := repo.Create(ctx, Args{"name": "a"}); !errors.Is(err, common.ErrConflict) {
+	if _, err := repo.Create(ctx, Args{"name": "a"}); !errors.Is(err, ErrConflict) {
 		t.Fatalf("duplicate: %v", err)
 	}
-	if _, err := repo.GetByID(ctx, "not-a-uuid"); !errors.Is(err, common.ErrInvalidInput) {
+	if _, err := repo.GetByID(ctx, "not-a-uuid"); !errors.Is(err, ErrInvalidInput) {
 		t.Fatalf("bad id: %v", err)
 	}
-	if _, err := repo.GetByID(ctx, "00000000-0000-0000-0000-000000000000"); !errors.Is(err, common.ErrNotFound) {
+	if _, err := repo.GetByID(ctx, "00000000-0000-0000-0000-000000000000"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("missing id: %v", err)
 	}
 	if got, err := repo.GetByID(ctx, a.ID); err != nil || got.Name != "a" {
@@ -130,7 +129,7 @@ func TestRepository(t *testing.T) {
 	if _, err := repo.Where(ctx, Args{`name" = 'a'; drop table widgets; --`: "x"}); err == nil {
 		t.Fatal("column names must be quoted")
 	}
-	if _, err := repo.Where(ctx, nil); !errors.Is(err, common.ErrInvalidInput) {
+	if _, err := repo.Where(ctx, nil); !errors.Is(err, ErrInvalidInput) {
 		t.Fatalf("empty filter: %v", err)
 	}
 
@@ -143,7 +142,7 @@ func TestRepository(t *testing.T) {
 	if u, err := repo.Update(ctx, a.ID, Args{"active": false}); err != nil || u.Active {
 		t.Fatalf("update with Args sets zero values: %+v %v", u, err)
 	}
-	if _, err := repo.Update(ctx, a.ID, widget{}); !errors.Is(err, common.ErrInvalidInput) {
+	if _, err := repo.Update(ctx, a.ID, widget{}); !errors.Is(err, ErrInvalidInput) {
 		t.Fatalf("empty update: %v", err)
 	}
 
@@ -200,12 +199,12 @@ func TestRepository(t *testing.T) {
 		t.Fatalf("save with a zero primary key inserts every column but the key (no column default): %+v %v", created, err)
 	}
 	must(repo.Delete(ctx, created.ID))
-	if _, err := repo.Save(ctx, widget{ID: "00000000-0000-0000-0000-000000000000", Name: "x"}); !errors.Is(err, common.ErrNotFound) {
+	if _, err := repo.Save(ctx, widget{ID: "00000000-0000-0000-0000-000000000000", Name: "x"}); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("save of a missing row: %v", err)
 	}
 
 	must(repo.Delete(ctx, a.ID))
-	if err := repo.Delete(ctx, a.ID); !errors.Is(err, common.ErrNotFound) {
+	if err := repo.Delete(ctx, a.ID); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("delete twice: %v", err)
 	}
 }
@@ -267,7 +266,7 @@ func TestTransactional(t *testing.T) {
 			_, err := repo.Create(ctx, widget{Name: "a"}) // duplicate
 			return err
 		})
-		if !errors.Is(inner, common.ErrConflict) {
+		if !errors.Is(inner, ErrConflict) {
 			t.Errorf("inner error must be translated: %v", inner)
 		}
 		return nil // the outer one decides to go on

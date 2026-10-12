@@ -3,13 +3,13 @@ package {{.Pkg}}
 import (
 	"{{.Import}}/dtos"
 	"context"
-	"fmt"
-	"{{.Framework}}/common"
+	"net/http"
+	"{{.Framework}}/core"
 	"strings"
 )
 
-// Service holds the business rules. Return common.Err* (wrapped) so the
-// handler can pick the HTTP status.
+// Service holds the business rules. Return core.NewError(http.Status..., msg)
+// so the handler can pick the HTTP status.
 type Service struct {
 	Repo *Repository `inject:""`
 }
@@ -25,7 +25,7 @@ func (s *Service) Get(ctx context.Context, id string) ({{.Name}}, error) {
 func (s *Service) Create(ctx context.Context, req dtos.CreateRequest) ({{.Name}}, error) {
 	req.Name = strings.TrimSpace(req.Name)
 	if req.Name == "" {
-		return {{.Name}}{}, fmt.Errorf("%w: name can't be blank", common.ErrInvalidInput)
+		return {{.Name}}{}, core.NewError(http.StatusBadRequest, "name can't be blank")
 	}
 	return s.Repo.Create(ctx, req)
 }

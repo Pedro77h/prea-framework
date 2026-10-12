@@ -6,8 +6,6 @@ import (
 	"slices"
 	"strings"
 
-	"prea/common"
-
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -50,7 +48,7 @@ func (r *BaseRepository[T]) Where(ctx context.Context, filter Args) ([]T, error)
 	return stmt.All(ctx)
 }
 
-// First returns the first row matching filter, or common.ErrNotFound.
+// First returns the first row matching filter, or ErrNotFound.
 func (r *BaseRepository[T]) First(ctx context.Context, filter Args) (T, error) {
 	stmt, err := r.selectWhere(filter, " limit 1")
 	if err != nil {
@@ -68,7 +66,7 @@ func (r *BaseRepository[T]) Create(ctx context.Context, data any) (T, error) {
 	}
 	cols, vals = withoutZeroPrimaryKey(cols, vals)
 	if len(cols) == 0 {
-		return zero, fmt.Errorf("%w: nothing to insert", common.ErrInvalidInput)
+		return zero, fmt.Errorf("%w: nothing to insert", ErrInvalidInput)
 	}
 
 	stmt := r.Prepare("")
@@ -90,7 +88,7 @@ func (r *BaseRepository[T]) Update(ctx context.Context, id any, data any) (T, er
 		return zero, err
 	}
 	if len(cols) == 0 {
-		return zero, fmt.Errorf("%w: nothing to update", common.ErrInvalidInput)
+		return zero, fmt.Errorf("%w: nothing to update", ErrInvalidInput)
 	}
 
 	stmt := r.Prepare("").Bind("id", id)
@@ -147,14 +145,14 @@ func (r *BaseRepository[T]) Exists(ctx context.Context, filter Args) (bool, erro
 func (r *BaseRepository[T]) Delete(ctx context.Context, id any) error {
 	n, err := r.Prepare("delete from "+r.table()+" where "+PrimaryKey+" = @id").Bind("id", id).Exec(ctx)
 	if err == nil && n == 0 {
-		return common.ErrNotFound
+		return ErrNotFound
 	}
 	return err
 }
 
 func (r *BaseRepository[T]) selectWhere(filter Args, suffix string) (*Statement[T], error) {
 	if len(filter) == 0 {
-		return nil, fmt.Errorf("%w: empty filter", common.ErrInvalidInput)
+		return nil, fmt.Errorf("%w: empty filter", ErrInvalidInput)
 	}
 	stmt := r.Prepare("")
 	stmt.sql = fmt.Sprintf("select * from %s%s order by %s%s", r.table(), where(stmt.param, filter), PrimaryKey, suffix)

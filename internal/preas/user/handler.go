@@ -1,9 +1,7 @@
 package user
 
 import (
-	"fmt"
 	"net/http"
-	"prea/common"
 	"prea/core"
 	"prea/internal/middleware"
 	"prea/internal/preas/user/dtos"
@@ -48,7 +46,7 @@ func (h *Handler) get(c *gin.Context) {
 func (h *Handler) create(c *gin.Context) {
 	var req dtos.CreateRequest
 	if err := c.ShouldBind(&req); err != nil {
-		core.Error(c, fmt.Errorf("%w: %v", common.ErrInvalidInput, err))
+		core.Error(c, core.NewError(http.StatusBadRequest, err.Error()))
 		return
 	}
 
@@ -63,7 +61,7 @@ func (h *Handler) create(c *gin.Context) {
 func (h *Handler) update(c *gin.Context) {
 	var req dtos.UpdateRequest
 	if err := c.ShouldBind(&req); err != nil {
-		core.Error(c, fmt.Errorf("%w: %v", common.ErrInvalidInput, err))
+		core.Error(c, core.NewError(http.StatusBadRequest, err.Error()))
 		return
 	}
 
