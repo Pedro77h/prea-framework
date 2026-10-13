@@ -52,6 +52,10 @@ func SyncSchema(ctx context.Context, mode string, components []any) (drop func(c
 			continue
 		}
 		db, typ := r.model()
+		if db == nil && mode != SchemaNone {
+			errs = append(errs, fmt.Errorf("database: %T has no database (DB is nil)", component))
+			continue
+		}
 		t, err := schemaOf(typ)
 		if err != nil {
 			errs = append(errs, err)

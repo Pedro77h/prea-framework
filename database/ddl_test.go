@@ -127,7 +127,7 @@ func (otherTeam) Table() string { return "app.teams" }
 // Without a database: the checks every mode runs before touching it.
 func TestSyncSchemaChecks(t *testing.T) {
 	ctx := t.Context()
-	repos := []any{&playerRepo{}, &teamRepo{}, &teamRepo{}, "not a repository"}
+	repos := []any{&playerRepo{}, &teamRepo{}, &teamRepo{}, "not a repository"} // no DB: fine for none
 	for _, mode := range []string{"", SchemaNone} {
 		drop, err := SyncSchema(ctx, mode, repos)
 		if err != nil || drop(ctx) != nil {
@@ -141,8 +141,9 @@ func TestSyncSchemaChecks(t *testing.T) {
 	}{
 		{"banana", repos, `schema "banana" is not none, validate`},
 		{SchemaNone, []any{&invalidRepo{}}, "no primary key"},
-		{SchemaValidate, []any{&teamRepo{}, &otherTeams{}}, "table app.teams is mapped by database.team and database.otherTeam"},
-		{SchemaValidate, []any{&playerRepo{}}, `fk:"app.teams" is not the table of a repository's model`},
+		{SchemaNone, []any{&teamRepo{}, &otherTeams{}}, "table app.teams is mapped by database.team and database.otherTeam"},
+		{SchemaNone, []any{&playerRepo{}}, `fk:"app.teams" is not the table of a repository's model`},
+		{SchemaUpdate, []any{&teamRepo{}}, "*database.teamRepo has no database (DB is nil)"},
 	} {
 		if _, err := SyncSchema(ctx, tc.mode, tc.comps); err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Errorf("%s: got %v, want %q", tc.mode, err, tc.want)
