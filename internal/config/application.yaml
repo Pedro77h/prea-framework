@@ -9,6 +9,7 @@ logging:
   format: text # text | json
 database:
   url: ${DATABASE_URL}
+  schema: validate # none | validate | update | create | create-drop
 security:
   jwt:
     secret: ${JWT_SECRET} # 32+ bytes: openssl rand -base64 32

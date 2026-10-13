@@ -1,2 +1,4 @@
 logging:
   level: debug
+database:
+  schema: update # creates the missing tables and columns at startup

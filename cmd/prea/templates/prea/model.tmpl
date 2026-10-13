@@ -1,9 +1,10 @@
 package {{.Pkg}}
 
 // {{.Name}} maps a row of the "{{.Table}}" table. Columns match fields by name
-// (snake_case); use a `db` tag to override.
+// (snake_case); use a `db` tag to override. The other tags describe the
+// schema: pk, generated, size, type, default, unique, index, fk and version.
 type {{.Name}} struct {
-	ID   string `json:"id"`
+	ID   string `json:"id" pk:"" generated:"uuid"`
 	Name string `json:"name"`
 }
 

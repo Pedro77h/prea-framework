@@ -70,6 +70,7 @@ import (
 	"testing"
 
 	"example.com/app/internal/middleware"
+	"prea/config"
 	"prea/core"
 
 	"github.com/gin-gonic/gin"
@@ -85,10 +86,15 @@ func TestApp(t *testing.T) {
 	}
 	defer pool.Close()
 
+	schema := "none"
+	if url != "" {
+		schema = "create-drop" // the generated models create their tables
+	}
 	engine, closer, err := core.App{
 		Modules:     Modules,
 		Middlewares: append(slices.Clone(Middlewares), middleware.RateLimit{}, middleware.RequestTiming),
 		Globals:     []any{pool},
+		Config:      config.New("", map[string]any{"database": map[string]any{"schema": schema}}),
 	}.Build(t.Context())
 	if err != nil {
 		t.Fatal(err)
@@ -111,10 +117,6 @@ func TestApp(t *testing.T) {
 		return
 	}
 
-	if _, err := pool.Exec(t.Context(), ` + "`" + `drop table if exists order_item;
-		create table order_item (id uuid primary key default gen_random_uuid(), name text not null)` + "`" + `); err != nil {
-		t.Fatal(err)
-	}
 	type reply struct {
 		Code int
 		Data struct{ ID, Name string }
