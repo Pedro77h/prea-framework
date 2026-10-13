@@ -1,6 +1,7 @@
 package database
 
 import (
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -225,6 +226,63 @@ func TestSchemaErrors(t *testing.T) {
 			t.Errorf("%v: got %v, want %q", typ, err, want)
 		}
 	}
+}
+
+type membership struct {
+	TeamID int64 `pk:""`
+	UserID int64 `pk:""`
+	Role   string
+	Rev    int64 `version:""`
+}
+
+func (membership) Table() string { return "memberships" }
+
+// The statements the repository builds, checked without a database.
+func TestRepositorySQL(t *testing.T) {
+	widgets := &BaseRepository[widget]{}
+	members := &BaseRepository[membership]{}
+	m, _ := schemaOf(reflect.TypeFor[membership]())
+	params := func() func(any) string { return Prepare[int](nil, "").param }
+
+	for _, tc := range []struct{ got, want string }{
+		{widgets.query(func(t *table, s *Statement[widget]) (string, error) { return "x" + t.orderBy(), nil }).sql,
+			`x order by "id"`},
+		{members.selectWhere(Args{"role": "admin"}, " limit 1").sql,
+			`select * from "memberships" where "role" = @p0 order by "team_id", "user_id" limit 1`},
+		{must(m.key(params(), Args{"user_id": 2, "team_id": 1})),
+			`"team_id" = @p0 and "user_id" = @p1`},
+		{must(m.insert(params(), []string{"team_id", "user_id", "role"}, []any{0, 2, "a"})),
+			`insert into "memberships" ("user_id", "role") values (@p0, @p1) returning *`},
+		{must(m.update(params(), []string{"team_id", "user_id", "role", "rev"}, []any{1, 2, "a", 3})),
+			`update "memberships" set "role" = @p2, "rev" = "rev" + 1 where "team_id" = @p0 and "user_id" = @p1 and "rev" = @p3 returning *`},
+		{must(m.upsert(params(), []string{"team_id", "user_id", "role", "rev"}, []any{1, 2, "a", 3})),
+			`insert into "memberships" as t ("team_id", "user_id", "role", "rev") values (@p0, @p1, @p2, @p3) ` +
+				`on conflict ("team_id", "user_id") do update set "role" = excluded."role", "rev" = t."rev" + 1 ` +
+				`where t."rev" = excluded."rev" returning *`},
+	} {
+		if tc.got != tc.want {
+			t.Errorf("\ngot  %s\nwant %s", tc.got, tc.want)
+		}
+	}
+
+	for _, id := range []any{1, Args{"team_id": 1}, Args{"team_id": 1, "role": "x"}} {
+		if _, err := m.key(params(), id); !errors.Is(err, ErrInvalidInput) {
+			t.Errorf("composite key with %v: %v", id, err)
+		}
+	}
+	if _, err := members.Update(t.Context(), Args{"team_id": 1, "user_id": 2}, struct{ Rev int64 }{4}); !errors.Is(err, ErrInvalidInput) {
+		t.Errorf("updating only the version is nothing to update: %v", err)
+	}
+	if _, err := (&BaseRepository[noKey]{}).GetAll(t.Context()); err == nil || !strings.Contains(err.Error(), "no primary key") {
+		t.Errorf("an invalid model fails when the query runs: %v", err)
+	}
+}
+
+func must(s string, err error) string {
+	if err != nil {
+		return err.Error()
+	}
+	return s
 }
 
 func TestSchemaReportsEveryError(t *testing.T) {

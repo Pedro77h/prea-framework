@@ -29,6 +29,8 @@ type Statement[T any] struct {
 	conn Conn
 	sql  string
 	args pgx.NamedArgs
+	n    int   // generated parameters
+	err  error // building the statement failed; returned when it runs
 }
 
 func Prepare[T any](conn Conn, sql string) *Statement[T] {
@@ -50,6 +52,9 @@ func (s *Statement[T]) BindArgs(args Args) *Statement[T] {
 // All returns every row. T is a struct (columns map to fields by `db` tag or
 // name, ignoring case and underscores) or a scalar for single-column queries.
 func (s *Statement[T]) All(ctx context.Context) ([]T, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
 	rows, err := connFor(ctx, s.conn).Query(ctx, s.sql, s.args)
 	if err != nil {
 		return nil, translate(err)
@@ -60,9 +65,12 @@ func (s *Statement[T]) All(ctx context.Context) ([]T, error) {
 
 // One returns exactly one row, or ErrNotFound.
 func (s *Statement[T]) One(ctx context.Context) (T, error) {
+	var zero T
+	if s.err != nil {
+		return zero, s.err
+	}
 	rows, err := connFor(ctx, s.conn).Query(ctx, s.sql, s.args)
 	if err != nil {
-		var zero T
 		return zero, translate(err)
 	}
 	item, err := pgx.CollectExactlyOneRow(rows, rowMapper[T]())
@@ -71,13 +79,17 @@ func (s *Statement[T]) One(ctx context.Context) (T, error) {
 
 // Exec runs a statement that returns no rows and reports the affected rows.
 func (s *Statement[T]) Exec(ctx context.Context) (int64, error) {
+	if s.err != nil {
+		return 0, s.err
+	}
 	tag, err := connFor(ctx, s.conn).Exec(ctx, s.sql, s.args)
 	return tag.RowsAffected(), translate(err)
 }
 
 // param binds value under a generated name and returns its placeholder.
-func (s *Statement[T]) param(i int, value any) string {
-	name := fmt.Sprintf("p%d", i)
+func (s *Statement[T]) param(value any) string {
+	name := fmt.Sprintf("p%d", s.n)
+	s.n++
 	s.args[name] = value
 	return "@" + name
 }
