@@ -6,6 +6,7 @@ import (
 	"slices"
 
 	"prea/config"
+	"prea/database"
 	"prea/di"
 
 	"github.com/gin-gonic/gin"
@@ -21,7 +22,9 @@ type Router interface {
 // injectable in every module.
 //
 // Config fills the value:"key" fields, is injectable as *config.Config and
-// picks the modules: one with Profiles loads only under one of them.
+// picks the modules: one with Profiles loads only under one of them. Its
+// database.schema key applies the repositories' models to the database
+// before Init (see database.SyncSchema).
 //
 // Middlewares (and Security.Middlewares) take functions and components, like
 // Module.Middlewares. Global components live in an implicit "app" module that
@@ -35,9 +38,10 @@ type App struct {
 	Config      *config.Config
 }
 
-// Build loads the modules, runs the components' Init (dependencies first)
-// and mounts their routes. closer runs their Close in reverse order; call it
-// once the engine stops serving. Globals are not closed: their owner does it.
+// Build loads the modules, syncs the database schema, runs the components'
+// Init (dependencies first) and mounts their routes. closer runs their Close
+// in reverse order (and drops the tables under create-drop); call it once
+// the engine stops serving. Globals are not closed: their owner does it.
 func (a App) Build(ctx context.Context) (engine *gin.Engine, closer func(context.Context) error, err error) {
 	modules := slices.DeleteFunc(slices.Clone(a.Modules), func(m *Module) bool {
 		return len(m.Profiles) > 0 && !slices.Contains(m.Profiles, a.Config.Profile())
@@ -51,14 +55,30 @@ func (a App) Build(ctx context.Context) (engine *gin.Engine, closer func(context
 	if err := c.Load(root); err != nil {
 		return nil, nil, err
 	}
-	if err := c.Init(ctx); err != nil {
+	var schema string
+	if a.Config != nil {
+		if err := a.Config.Value("database.schema", &schema); err != nil {
+			return nil, nil, err
+		}
+	}
+	var components []any
+	for _, m := range c.Modules() {
+		components = append(components, c.Providers(m)...)
+	}
+	drop, err := database.SyncSchema(ctx, schema, components)
+	if err != nil {
 		return nil, nil, err
+	}
+	closer = func(ctx context.Context) error { return errors.Join(c.Close(ctx), drop(ctx)) }
+
+	if err := c.Init(ctx); err != nil {
+		return nil, nil, errors.Join(err, drop(ctx))
 	}
 	engine, err = a.engine(c, root)
 	if err != nil {
-		return nil, nil, errors.Join(err, c.Close(ctx))
+		return nil, nil, errors.Join(err, closer(ctx))
 	}
-	return engine, c.Close, nil
+	return engine, closer, nil
 }
 
 func (a App) engine(c *di.Container, root *Module) (*gin.Engine, error) {

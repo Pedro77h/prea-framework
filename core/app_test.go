@@ -7,9 +7,11 @@ import (
 	"testing"
 
 	"prea/config"
+	"prea/database"
 	"prea/di"
 
 	"github.com/gin-gonic/gin"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func trace(name string) Middleware {
@@ -273,5 +275,44 @@ func TestConfig(t *testing.T) {
 	engine.ServeHTTP(w, httptest.NewRequest("GET", "/mail", nil))
 	if w.Body.String() != ":0" {
 		t.Fatalf("missing keys must stay zero: %q", w.Body)
+	}
+}
+
+type keyless struct{ Name string }
+
+func (keyless) Table() string { return "keyless" }
+
+type keylessRepository struct {
+	database.BaseRepository[keyless]
+}
+
+type validRepository struct {
+	database.BaseRepository[valid]
+}
+
+type valid struct{ ID int64 }
+
+func (valid) Table() string { return "valid" }
+
+func TestDatabaseSchema(t *testing.T) {
+	db, err := pgxpool.New(t.Context(), "postgres://nobody@127.0.0.1:1/none") // lazy: never connects here
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	build := func(schema string, providers ...any) error {
+		cfg := config.New("", map[string]any{"database": map[string]any{"schema": schema}})
+		_, _, err := App{Modules: []*Module{{Name: "m", Providers: providers}}, Globals: []any{db}, Config: cfg}.Build(t.Context())
+		return err
+	}
+
+	if err := build("none", validRepository{}); err != nil {
+		t.Fatalf("none only reads the tags: %v", err)
+	}
+	if err := build("banana", validRepository{}); err == nil || !strings.Contains(err.Error(), `schema "banana"`) {
+		t.Fatalf("an unknown mode must fail at startup: %v", err)
+	}
+	if err := build("", keylessRepository{}); err == nil || !strings.Contains(err.Error(), "no primary key") {
+		t.Fatalf("an invalid model must fail at startup: %v", err)
 	}
 }

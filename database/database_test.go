@@ -56,23 +56,39 @@ type widget struct {
 	Name     string     `json:"name" unique:""`
 	OwnerID  *int       `json:"owner_id"`
 	LastSeen *time.Time `json:"last_seen"`
-	Active   bool       `json:"active"`
+	Active   bool       `json:"active" default:"true"`
 }
 
 func (widget) Table() string { return "widgets" }
 
-// Runs against a real database: PREA_TEST_DATABASE_URL=postgres://... go test ./database
-func TestRepository(t *testing.T) {
+// testDB connects to PREA_TEST_DATABASE_URL and creates the tables of
+// models, or skips the test when it is not set:
+//
+//	PREA_TEST_DATABASE_URL=postgres://... go test ./database
+func testDB(t *testing.T, models ...any) *pgxpool.Pool {
+	t.Helper()
 	url := os.Getenv("PREA_TEST_DATABASE_URL")
 	if url == "" {
 		t.Skip("PREA_TEST_DATABASE_URL not set")
 	}
-	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, url)
+	pool, err := pgxpool.New(context.Background(), url)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer pool.Close()
+	t.Cleanup(pool.Close)
+	for _, m := range models {
+		reflect.ValueOf(m).Elem().FieldByName("DB").Set(reflect.ValueOf(pool))
+	}
+	if _, err := SyncSchema(t.Context(), SchemaCreate, models); err != nil {
+		t.Fatal(err)
+	}
+	return pool
+}
+
+func TestRepository(t *testing.T) {
+	ctx := context.Background()
+	repo := &BaseRepository[widget]{}
+	pool := testDB(t, repo)
 
 	must := func(err error) {
 		t.Helper()
@@ -80,17 +96,7 @@ func TestRepository(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	_, err = pool.Exec(ctx, `drop table if exists widgets;
-		create table widgets (
-			id uuid primary key default gen_random_uuid(),
-			name text not null unique,
-			owner_id int,
-			last_seen timestamptz,
-			active bool not null default true
-		)`)
-	must(err)
 
-	repo := &BaseRepository[widget]{DB: pool}
 	owner := 1
 
 	a, err := repo.Create(ctx, struct {
@@ -209,25 +215,10 @@ func TestRepository(t *testing.T) {
 	}
 }
 
-// Runs against a real database: PREA_TEST_DATABASE_URL=postgres://... go test ./database
 func TestTransactional(t *testing.T) {
-	url := os.Getenv("PREA_TEST_DATABASE_URL")
-	if url == "" {
-		t.Skip("PREA_TEST_DATABASE_URL not set")
-	}
 	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, url)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer pool.Close()
-	if _, err := pool.Exec(ctx, `drop table if exists widgets; create table widgets (
-		id uuid primary key default gen_random_uuid(), name text not null unique,
-		owner_id int, last_seen timestamptz, active bool not null default true)`); err != nil {
-		t.Fatal(err)
-	}
-
-	repo := &BaseRepository[widget]{DB: pool}
+	repo := &BaseRepository[widget]{}
+	pool := testDB(t, repo)
 	svc := Transactional{DB: pool}
 	names := func(ctx context.Context) string {
 		ns, err := Prepare[string](pool, "select name from widgets order by name").All(ctx)
@@ -238,7 +229,7 @@ func TestTransactional(t *testing.T) {
 	}
 	fail := errors.New("fail")
 
-	err = svc.Transaction(ctx, func(ctx context.Context) error {
+	err := svc.Transaction(ctx, func(ctx context.Context) error {
 		if _, err := repo.Create(ctx, widget{Name: "a"}); err != nil {
 			return err
 		}
@@ -301,5 +292,172 @@ func TestTransactionalInjection(t *testing.T) {
 	}
 	if got := c.Providers(m)[0].(*service).DB; got != pool {
 		t.Fatalf("the embedded Transactional must get the pool: %v", got)
+	}
+}
+
+func TestRepositoryKeys(t *testing.T) {
+	ctx := t.Context()
+	teams, members := &BaseRepository[team]{}, &BaseRepository[membership]{}
+	testDB(t, teams, members)
+
+	// auto_increment
+	a, err := teams.Create(ctx, team{Name: "a"})
+	if err != nil || a.ID == 0 {
+		t.Fatalf("auto_increment: %+v %v", a, err)
+	}
+	b, err := teams.Save(ctx, team{Name: "b"})
+	if err != nil || b.ID != a.ID+1 {
+		t.Fatalf("save with a zero generated key inserts: %+v %v", b, err)
+	}
+	if _, err := teams.Save(ctx, team{ID: 999, Name: "x"}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("save with a missing generated key: %v", err)
+	}
+
+	// composite natural key: Save is an upsert, the id is Args
+	key := Args{"team_id": int64(1), "user_id": int64(2)}
+	m, err := members.Save(ctx, membership{TeamID: 1, UserID: 2, Role: "member"})
+	if err != nil || m.Role != "member" || m.Rev != 0 {
+		t.Fatalf("upsert inserts: %+v %v", m, err)
+	}
+	m.Role = "admin"
+	if m, err = members.Save(ctx, m); err != nil || m.Role != "admin" || m.Rev != 1 {
+		t.Fatalf("upsert updates and increments the version: %+v %v", m, err)
+	}
+	if got, err := members.GetByID(ctx, key); err != nil || got != m {
+		t.Fatalf("get by composite key: %+v %v", got, err)
+	}
+	if _, err := members.GetByID(ctx, int64(1)); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("a composite key needs Args: %v", err)
+	}
+	if u, err := members.Update(ctx, key, struct{ Role string }{"owner"}); err != nil || u.Rev != 2 {
+		t.Fatalf("update increments the version: %+v %v", u, err)
+	}
+
+	// optimistic lock: m is stale now (rev 1, the row has 2)
+	m.Role = "stale"
+	if _, err := members.Save(ctx, m); !errors.Is(err, ErrConflict) {
+		t.Fatalf("a stale upsert: %v", err)
+	}
+	if err := members.Delete(ctx, key); err != nil {
+		t.Fatal(err)
+	}
+}
+
+type versioned struct {
+	ID   string `pk:"" generated:"uuid"`
+	Name string
+	Rev  int32 `version:""`
+}
+
+func (versioned) Table() string { return "versioned" }
+
+func TestOptimisticLock(t *testing.T) {
+	ctx := t.Context()
+	repo := &BaseRepository[versioned]{}
+	testDB(t, repo)
+
+	v, err := repo.Create(ctx, versioned{Name: "a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, second := v, v // two requests load the same row
+	first.Name, second.Name = "first", "second"
+	if saved, err := repo.Save(ctx, first); err != nil || saved.Rev != 1 {
+		t.Fatalf("first save: %+v %v", saved, err)
+	}
+	if _, err := repo.Save(ctx, second); !errors.Is(err, ErrConflict) {
+		t.Fatalf("the second save must conflict: %v", err)
+	}
+	if got, _ := repo.GetByID(ctx, v.ID); got.Name != "first" {
+		t.Fatalf("the conflicting save must not write: %+v", got)
+	}
+	if _, err := repo.Save(ctx, versioned{ID: "00000000-0000-0000-0000-000000000000", Name: "x"}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("a missing row is not a conflict: %v", err)
+	}
+}
+
+type gadget struct {
+	ID    int64
+	Name  string
+	Color *string `index:""`
+	Size  int16   `default:"1"`
+}
+
+func (gadget) Table() string { return "gadgets" }
+
+type drift struct {
+	ID    int64
+	Name  string
+	Score int64
+	Count int64
+	Note  *string
+}
+
+func (drift) Table() string { return "drift" }
+
+type absent struct{ ID int64 }
+
+func (absent) Table() string { return "absent" }
+
+func TestSyncSchemaModes(t *testing.T) {
+	ctx := t.Context()
+	pool := testDB(t)
+	exec := func(sql string) {
+		t.Helper()
+		if _, err := pool.Exec(ctx, sql); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tableExists := func(name string) bool {
+		var ok bool
+		if err := pool.QueryRow(ctx, "select to_regclass($1) is not null", name).Scan(&ok); err != nil {
+			t.Fatal(err)
+		}
+		return ok
+	}
+	gadgets := &BaseRepository[gadget]{DB: pool}
+
+	// update adds what is missing to a table with rows, and keeps them
+	exec(`drop table if exists gadgets; create table gadgets (id int8 primary key, name text not null);
+		insert into gadgets values (1, 'a')`)
+	if _, err := SyncSchema(ctx, SchemaUpdate, []any{gadgets}); err != nil {
+		t.Fatal(err)
+	}
+	if g, err := gadgets.GetByID(ctx, 1); err != nil || g.Name != "a" || g.Size != 1 || g.Color != nil {
+		t.Fatalf("update: %+v %v", g, err)
+	}
+	if _, err := SyncSchema(ctx, SchemaUpdate, []any{gadgets}); err != nil {
+		t.Fatalf("update is idempotent: %v", err)
+	}
+	if _, err := SyncSchema(ctx, SchemaValidate, []any{gadgets}); err != nil {
+		t.Fatalf("validate after update: %v", err)
+	}
+
+	// validate reports every difference at once
+	exec(`drop table if exists drift; drop table if exists absent;
+		create table drift (id int8 primary key, name text, score int4 not null, note text not null)`)
+	_, err := SyncSchema(ctx, SchemaValidate, []any{&BaseRepository[drift]{DB: pool}, &BaseRepository[absent]{DB: pool}})
+	for _, want := range []string{
+		"drift.name is nullable: make the field a pointer",
+		"drift.score is int4, the model wants int8",
+		"drift.count is missing",
+		"drift.note is not null: make the field a value",
+		"table absent is missing",
+	} {
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("validate: want %q in %v", want, err)
+		}
+	}
+
+	// create-drop: created now, dropped by drop
+	drop, err := SyncSchema(ctx, SchemaCreateDrop, []any{gadgets})
+	if err != nil || !tableExists("gadgets") {
+		t.Fatalf("create-drop: %v", err)
+	}
+	if n, _ := gadgets.Count(ctx, nil); n != 0 {
+		t.Fatalf("create starts from an empty table: %d rows", n)
+	}
+	if err := drop(ctx); err != nil || tableExists("gadgets") {
+		t.Fatalf("drop: %v", err)
 	}
 }
