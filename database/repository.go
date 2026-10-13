@@ -179,7 +179,12 @@ func where(param func(int, any) string, filter Args) string {
 
 func (r *BaseRepository[T]) table() string {
 	var model T
-	return pgx.Identifier(strings.Split(model.Table(), ".")).Sanitize()
+	return quoteTable(model.Table())
+}
+
+// quoteTable quotes "schema.table" as "schema"."table".
+func quoteTable(name string) string {
+	return pgx.Identifier(strings.Split(name, ".")).Sanitize()
 }
 
 func quote(col string) string {

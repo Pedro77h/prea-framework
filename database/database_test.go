@@ -52,8 +52,8 @@ func TestColumns(t *testing.T) {
 }
 
 type widget struct {
-	ID       string     `json:"id"`
-	Name     string     `json:"name"`
+	ID       string     `json:"id" pk:"" generated:"uuid"`
+	Name     string     `json:"name" unique:""`
 	OwnerID  *int       `json:"owner_id"`
 	LastSeen *time.Time `json:"last_seen"`
 	Active   bool       `json:"active"`
